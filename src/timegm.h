@@ -1,7 +1,7 @@
 /*
  * Spdylay - SPDY Library
  *
- * Copyright (c) 2012 Tatsuhiro Tsujikawa
+ * Copyright (c) 2013 Tatsuhiro Tsujikawa
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -22,52 +22,27 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef URI_H
-#define URI_H
+#ifndef TIMEGM_H
+#define TIMEGM_H
 
-#include "spdylay_config.h"
+#ifdef HAVE_CONFIG_H
+#  include <config.h>
+#endif // HAVE_CONFIG_H
 
-#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
-#include <string>
+#include <time.h>
 
-namespace spdylay {
+#ifndef HAVE_TIMEGM
 
-namespace uri {
+time_t timegm(struct tm *tm);
 
-struct UriStruct {
-  std::string protocol;
-  std::string host;
-  uint16_t port;
-  std::string dir;
-  std::string file;
-  std::string query;
-  std::string username;
-  std::string password;
-  bool hasPassword;
-  bool ipv6LiteralAddress;
+#endif /* HAVE_TIMEGM */
 
-  UriStruct();
-  UriStruct(const UriStruct& c);
-  ~UriStruct();
+#ifdef __cplusplus
+}
+#endif /* __cplusplus */
 
-  UriStruct& operator=(const UriStruct& c);
-  void swap(UriStruct& other);
-};
-
-void swap(UriStruct& lhs, UriStruct& rhs);
-
-// Splits URI uri into components and stores them into result.  On
-// success returns true. Otherwise returns false and result is
-// undefined.
-bool parse(UriStruct& result, const std::string& uri);
-
-std::string construct(const UriStruct& us);
-
-std::string joinUri(const std::string& baseUri, const std::string& uri);
-
-} // namespace uri
-
-} // namespace spdylay
-
-#endif // URI_H
+#endif /* TIMEGM_H */

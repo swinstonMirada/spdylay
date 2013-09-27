@@ -73,48 +73,45 @@ bool is_ipv6_numeric_addr(const char *host)
 } // namespace
 
 namespace {
-int cache_downstream_host_address()
+int resolve_hostname(sockaddr_union *addr, size_t *addrlen,
+                     const char *hostname, uint16_t port, int family)
 {
   addrinfo hints;
   int rv;
   char service[10];
 
-  snprintf(service, sizeof(service), "%u", get_config()->downstream_port);
+  snprintf(service, sizeof(service), "%u", port);
   memset(&hints, 0, sizeof(addrinfo));
 
-  if(get_config()->backend_ipv4) {
-    hints.ai_family = AF_INET;
-  } else if(get_config()->backend_ipv6) {
-    hints.ai_family = AF_INET6;
-  } else {
-    hints.ai_family = AF_UNSPEC;
-  }
+  hints.ai_family = family;
   hints.ai_socktype = SOCK_STREAM;
 #ifdef AI_ADDRCONFIG
   hints.ai_flags |= AI_ADDRCONFIG;
 #endif // AI_ADDRCONFIG
   addrinfo *res;
 
-  rv = getaddrinfo(get_config()->downstream_host, service, &hints, &res);
+  rv = getaddrinfo(hostname, service, &hints, &res);
   if(rv != 0) {
-    LOG(FATAL) << "Unable to get downstream address: " << gai_strerror(rv);
-    DIE();
+    LOG(FATAL) << "Unable to resolve address for " << hostname
+               << ": " << gai_strerror(rv);
+    return -1;
   }
 
   char host[NI_MAXHOST];
   rv = getnameinfo(res->ai_addr, res->ai_addrlen, host, sizeof(host),
                   0, 0, NI_NUMERICHOST);
   if(rv == 0) {
-    LOG(INFO) << "Using first returned address for downstream "
-              << host
-              << ", port "
-              << get_config()->downstream_port;
+    if(LOG_ENABLED(INFO)) {
+      LOG(INFO) << "Address resolution for " << hostname << " succeeded: "
+                << host;
+    }
   } else {
-    LOG(FATAL) << gai_strerror(rv);
-    DIE();
+    LOG(FATAL) << "Address resolution for " << hostname << " failed: "
+               << gai_strerror(rv);
+    return -1;
   }
-  memcpy(&mod_config()->downstream_addr, res->ai_addr, res->ai_addrlen);
-  mod_config()->downstream_addrlen = res->ai_addrlen;
+  memcpy(addr, res->ai_addr, res->ai_addrlen);
+  *addrlen = res->ai_addrlen;
   freeaddrinfo(res);
   return 0;
 }
@@ -147,8 +144,11 @@ evconnlistener* create_evlistener(ListenHandler *handler, int family)
   addrinfo *res, *rp;
   r = getaddrinfo(get_config()->host, service, &hints, &res);
   if(r != 0) {
-    LOG(INFO) << "Unable to get address for " << get_config()->host << ": "
-               << gai_strerror(r);
+    if(LOG_ENABLED(INFO)) {
+      LOG(INFO) << "Unable to get IPv" << (family == AF_INET ? "4" : "6")
+                << " address for " << get_config()->host << ": "
+                << gai_strerror(r);
+    }
     return NULL;
   }
   for(rp = res; rp; rp = rp->ai_next) {
@@ -182,7 +182,10 @@ evconnlistener* create_evlistener(ListenHandler *handler, int family)
     r = getnameinfo(rp->ai_addr, rp->ai_addrlen, host, sizeof(host),
                         0, 0, NI_NUMERICHOST);
     if(r == 0) {
-      LOG(INFO) << "Listening on " << host << ", port " << get_config()->port;
+      if(LOG_ENABLED(INFO)) {
+        LOG(INFO) << "Listening on " << host << ", port "
+                  << get_config()->port;
+      }
     } else {
       LOG(FATAL) << gai_strerror(r);
       DIE();
@@ -190,7 +193,7 @@ evconnlistener* create_evlistener(ListenHandler *handler, int family)
   }
   freeaddrinfo(res);
   if(rp == 0) {
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       LOG(INFO) << "Listening " << (family == AF_INET ? "IPv4" : "IPv6")
                 << " socket failed";
     }
@@ -230,12 +233,38 @@ void drop_privileges()
 } // namespace
 
 namespace {
+void save_pid()
+{
+  std::ofstream out(get_config()->pid_file, std::ios::binary);
+  out << getpid() << "\n";
+  out.close();
+  if(!out) {
+    LOG(ERROR) << "Could not save PID to file " << get_config()->pid_file;
+    exit(EXIT_FAILURE);
+  }
+}
+} // namespace
+
+namespace {
 int event_loop()
 {
   event_base *evbase = event_base_new();
+  SSL_CTX *sv_ssl_ctx, *cl_ssl_ctx;
 
-  ListenHandler *listener_handler = new ListenHandler(evbase);
+  if(get_config()->client_mode) {
+    sv_ssl_ctx = 0;
+    cl_ssl_ctx = get_config()->spdy_downstream_no_tls ?
+      0 : ssl::create_ssl_client_context();
+  } else {
+    sv_ssl_ctx = get_config()->spdy_upstream_no_tls ?
+      0 : get_config()->default_ssl_ctx;
+    cl_ssl_ctx = get_config()->spdy_bridge &&
+      !get_config()->spdy_downstream_no_tls ?
+      ssl::create_ssl_client_context() : 0;
+  }
 
+  ListenHandler *listener_handler = new ListenHandler(evbase, sv_ssl_ctx,
+                                                      cl_ssl_ctx);
   if(get_config()->daemon) {
     if(daemon(0, 0) == -1) {
       LOG(FATAL) << "Failed to daemonize: " << strerror(errno);
@@ -243,9 +272,9 @@ int event_loop()
     }
   }
 
-  // ListenHandler loads private key. After that, we drop the root
-  // privileges if needed.
-  drop_privileges();
+  if(get_config()->pid_file) {
+    save_pid();
+  }
 
   evconnlistener *evlistener6, *evlistener4;
   evlistener6 = create_evlistener(listener_handler, AF_INET6);
@@ -256,13 +285,17 @@ int event_loop()
     exit(EXIT_FAILURE);
   }
 
+  // ListenHandler loads private key, and we listen on a priveleged port.
+  // After that, we drop the root privileges if needed.
+  drop_privileges();
+
   if(get_config()->num_worker > 1) {
     listener_handler->create_worker_thread(get_config()->num_worker);
-  } else if(get_config()->client_mode) {
+  } else if(get_config()->downstream_proto == PROTO_SPDY) {
     listener_handler->create_spdy_session();
   }
 
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     LOG(INFO) << "Entering event loop";
   }
   event_base_loop(evbase, 0);
@@ -273,19 +306,6 @@ int event_loop()
     evconnlistener_free(evlistener6);
   }
   return 0;
-}
-} // namespace
-
-namespace {
-void save_pid()
-{
-  std::ofstream out(get_config()->pid_file, std::ios::binary);
-  out << getpid() << "\n";
-  out.close();
-  if(!out) {
-    LOG(ERROR) << "Could not save PID to file " << get_config()->pid_file;
-    exit(EXIT_FAILURE);
-  }
 }
 } // namespace
 
@@ -308,7 +328,7 @@ void fill_default_config()
   mod_config()->daemon = false;
   mod_config()->verify_client = false;
 
-  mod_config()->server_name = "shrpx spdylay/"SPDYLAY_VERSION;
+  mod_config()->server_name = "shrpx spdylay/" SPDYLAY_VERSION;
   set_config_str(&mod_config()->host, "0.0.0.0");
   mod_config()->port = 3000;
   mod_config()->private_key_file = 0;
@@ -341,15 +361,20 @@ void fill_default_config()
   mod_config()->spdy_upstream_window_bits = 16;
   mod_config()->spdy_downstream_window_bits = 16;
 
+  mod_config()->spdy_upstream_no_tls = false;
+  mod_config()->spdy_upstream_version = 3;
+  mod_config()->spdy_downstream_no_tls = false;
+  mod_config()->spdy_downstream_version = 3;
+
   set_config_str(&mod_config()->downstream_host, "127.0.0.1");
   mod_config()->downstream_port = 80;
   mod_config()->downstream_hostport = 0;
   mod_config()->downstream_addrlen = 0;
 
   mod_config()->num_worker = 1;
-  mod_config()->spdy_max_concurrent_streams =
-    SPDYLAY_INITIAL_MAX_CONCURRENT_STREAMS;
+  mod_config()->spdy_max_concurrent_streams = 100;
   mod_config()->add_x_forwarded_for = false;
+  mod_config()->no_via = false;
   mod_config()->accesslog = false;
   set_config_str(&mod_config()->conf_path, "/etc/shrpx/shrpx.conf");
   mod_config()->syslog = false;
@@ -358,7 +383,9 @@ void fill_default_config()
   // Default accept() backlog
   mod_config()->backlog = 256;
   mod_config()->ciphers = 0;
+  mod_config()->honor_cipher_order = false;
   mod_config()->spdy_proxy = false;
+  mod_config()->spdy_bridge = false;
   mod_config()->client_proxy = false;
   mod_config()->client = false;
   mod_config()->client_mode = false;
@@ -370,6 +397,27 @@ void fill_default_config()
   mod_config()->backend_ipv4 = false;
   mod_config()->backend_ipv6 = false;
   mod_config()->tty = isatty(fileno(stderr));
+  mod_config()->cert_tree = 0;
+  mod_config()->downstream_http_proxy_userinfo = 0;
+  mod_config()->downstream_http_proxy_host = 0;
+  mod_config()->downstream_http_proxy_port = 0;
+  mod_config()->downstream_http_proxy_addrlen = 0;
+  mod_config()->rate_limit_cfg = 0;
+  mod_config()->read_rate = 1024*1024;
+  mod_config()->read_burst = 4*1024*1024;
+  mod_config()->write_rate = 0;
+  mod_config()->write_burst = 0;
+}
+} // namespace
+
+namespace {
+size_t get_rate_limit(size_t rate_limit)
+{
+  if(rate_limit == 0) {
+    return EV_RATE_LIMIT_MAX;
+  } else {
+    return rate_limit;
+  }
 }
 } // namespace
 
@@ -427,6 +475,29 @@ void print_help(std::ostream& out)
       << "                       Set the number of worker threads.\n"
       << "                       Default: "
       << get_config()->num_worker << "\n"
+      << "    --read-rate=<RATE> Set maximum average read rate on frontend\n"
+      << "                       connection. Setting 0 to this option means\n"
+      << "                       read rate is unlimited.\n"
+      << "                       Default: "
+      << get_config()->read_rate << "\n"
+      << "    --read-burst=<SIZE>\n"
+      << "                       Set maximum read burst size on frontend\n"
+      << "                       connection. Setting 0 to this option means\n"
+      << "                       read burst size is unlimited.\n"
+      << "                       Default: "
+      << get_config()->read_burst << "\n"
+      << "    --write-rate=<RATE>\n"
+      << "                       Set maximum average write rate on frontend\n"
+      << "                       connection. Setting 0 to this option means\n"
+      << "                       write rate is unlimited.\n"
+      << "                       Default: "
+      << get_config()->write_rate << "\n"
+      << "    --write-burst=<SIZE>\n"
+      << "                       Set maximum write burst size on frontend\n"
+      << "                       connection. Setting 0 to this option means\n"
+      << "                       write burst size is unlimited.\n"
+      << "                       Default: "
+      << get_config()->write_burst << "\n"
       << "\n"
       << "  Timeout:\n"
       << "    --frontend-spdy-read-timeout=<SEC>\n"
@@ -454,10 +525,30 @@ void print_help(std::ostream& out)
       << "                       Specify keep-alive timeout for backend\n"
       << "                       connection. Default: "
       << get_config()->downstream_idle_read_timeout.tv_sec << "\n"
+      << "    --backend-http-proxy-uri=<URI>\n"
+      << "                       Specify proxy URI in the form\n"
+      << "                       http://[<USER>:<PASS>@]<PROXY>:<PORT>. If\n"
+      << "                       a proxy requires authentication, specify\n"
+      << "                       <USER> and <PASS>. Note that they must be\n"
+      << "                       properly percent-encoded. This proxy is used\n"
+      << "                       when the backend connection is SPDY. First,\n"
+      << "                       make a CONNECT request to the proxy and\n"
+      << "                       it connects to the backend on behalf of\n"
+      << "                       shrpx. This forms tunnel. After that, shrpx\n"
+      << "                       performs SSL/TLS handshake with the\n"
+      << "                       downstream through the tunnel. The timeouts\n"
+      << "                       when connecting and making CONNECT request\n"
+      << "                       can be specified by --backend-read-timeout\n"
+      << "                       and --backend-write-timeout options.\n"
       << "\n"
       << "  SSL/TLS:\n"
       << "    --ciphers=<SUITE>  Set allowed cipher list. The format of the\n"
       << "                       string is described in OpenSSL ciphers(1).\n"
+      << "                       If this option is used, --honor-cipher-order\n"
+      << "                       is implicitly enabled.\n"
+      << "    --honor-cipher-order\n"
+      << "                       Honor server cipher order, giving the\n"
+      << "                       ability to mitigate BEAST attacks.\n"
       << "    -k, --insecure     When used with -p or --client, don't verify\n"
       << "                       backend server's certificate.\n"
       << "    --cacert=<PATH>    When used with -p or --client, set path to\n"
@@ -471,7 +562,21 @@ void print_help(std::ostream& out)
       << "                       Path to file that contains password for the\n"
       << "                       server's private key. If none is given and\n"
       << "                       the private key is password protected it'll\n"
-      << "                       be requested interactively."
+      << "                       be requested interactively.\n"
+      << "    --subcert=<KEYPATH>:<CERTPATH>\n"
+      << "                       Specify additional certificate and private\n"
+      << "                       key file. Shrpx will choose certificates\n"
+      << "                       based on the hostname indicated by client\n"
+      << "                       using TLS SNI extension. This option can be\n"
+      << "                       used multiple times.\n"
+      << "    --backend-tls-sni-field=<HOST>\n"
+      << "                       Explicitly set the content of the TLS SNI\n"
+      << "                       extension.  This will default to the backend\n"
+      << "                       HOST name.\n"
+      << "    --dh-param-file=<PATH>\n"
+      << "                       Path to file that contains DH parameters in\n"
+      << "                       PEM format. Without this option, DHE cipher\n"
+      << "                       suites are not available.\n"
       << "\n"
       << "  SPDY:\n"
       << "    -c, --spdy-max-concurrent-streams=<NUM>\n"
@@ -484,14 +589,39 @@ void print_help(std::ostream& out)
       << "                       frontend connection to 2**<N>.\n"
       << "                       Default: "
       << get_config()->spdy_upstream_window_bits << "\n"
+      << "    --frontend-spdy-no-tls\n"
+      << "                       Disable SSL/TLS on frontend SPDY\n"
+      << "                       connections. SPDY protocol must be specified\n"
+      << "                       using --frontend-spdy-proto. This option\n"
+      << "                       also disables frontend HTTP/1.1.\n"
+      << "    --frontend-spdy-proto\n"
+      << "                       Specify SPDY protocol used in frontend\n"
+      << "                       connection if --frontend-spdy-no-tls is\n"
+      << "                       used. Default: spdy/"
+      << get_config()->spdy_upstream_version << "\n"
       << "    --backend-spdy-window-bits=<N>\n"
       << "                       Sets the initial window size of SPDY\n"
       << "                       backend connection to 2**<N>.\n"
       << "                       Default: "
       << get_config()->spdy_downstream_window_bits << "\n"
+      << "    --backend-spdy-no-tls\n"
+      << "                       Disable SSL/TLS on backend SPDY connections.\n"
+      << "                       SPDY protocol must be specified using\n"
+      << "                       --backend-spdy-proto\n"
+      << "    --backend-spdy-proto\n"
+      << "                       Specify SPDY protocol used in backend\n"
+      << "                       connection if --backend-spdy-no-tls is used.\n"
+      << "                       Default: spdy/"
+      << get_config()->spdy_downstream_version << "\n"
       << "\n"
       << "  Mode:\n"
       << "    -s, --spdy-proxy   Enable secure SPDY proxy mode.\n"
+      << "    --spdy-bridge      Communicate with the backend in SPDY. Thus\n"
+      << "                       the incoming SPDY/HTTPS connections are\n"
+      << "                       converted to SPDY connection and relayed to\n"
+      << "                       the backend. See --backend-http-proxy-uri\n"
+      << "                       option if you are behind the proxy and want\n"
+      << "                       to connect to the outside SPDY proxy.\n"
       << "    --client           Instead of accepting SPDY/HTTPS connection,\n"
       << "                       accept HTTP connection and communicate with\n"
       << "                       backend server in SPDY. To use shrpx as\n"
@@ -499,7 +629,7 @@ void print_help(std::ostream& out)
       << "    -p, --client-proxy Like --client option, but it also requires\n"
       << "                       the request path from frontend must be\n"
       << "                       an absolute URI, suitable for use as a\n"
-      << "                       forward proxy."
+      << "                       forward proxy.\n"
       << "\n"
       << "  Logging:\n"
       << "    -L, --log-level=<LEVEL>\n"
@@ -517,6 +647,9 @@ void print_help(std::ostream& out)
       << "    --add-x-forwarded-for\n"
       << "                       Append X-Forwarded-For header field to the\n"
       << "                       downstream request.\n"
+      << "    --no-via           Don't append to Via header field. If Via\n"
+      << "                       header field is received, it is left\n"
+      << "                       unaltered.\n"
       << "    -D, --daemon       Run in a background. If -D is used, the\n"
       << "                       current working directory is changed to '/'.\n"
       << "    --pid-file=<PATH>  Set path to save PID of this program.\n"
@@ -574,6 +707,21 @@ int main(int argc, char **argv)
       {"backend-ipv4", no_argument, &flag, 20 },
       {"backend-ipv6", no_argument, &flag, 21 },
       {"private-key-passwd-file", required_argument, &flag, 22},
+      {"no-via", no_argument, &flag, 23},
+      {"subcert", required_argument, &flag, 24},
+      {"spdy-bridge", no_argument, &flag, 25},
+      {"backend-http-proxy-uri", required_argument, &flag, 26},
+      {"backend-spdy-no-tls", no_argument, &flag, 27},
+      {"backend-spdy-proto", required_argument, &flag, 28},
+      {"frontend-spdy-no-tls", no_argument, &flag, 29},
+      {"frontend-spdy-proto", required_argument, &flag, 30},
+      {"backend-tls-sni-field", required_argument, &flag, 31},
+      {"honor-cipher-order", no_argument, &flag, 32},
+      {"dh-param-file", required_argument, &flag, 33},
+      {"read-rate", required_argument, &flag, 34},
+      {"read-burst", required_argument, &flag, 35},
+      {"write-rate", required_argument, &flag, 36},
+      {"write-burst", required_argument, &flag, 37},
       {0, 0, 0, 0 }
     };
     int option_index = 0;
@@ -716,6 +864,73 @@ int main(int argc, char **argv)
         cmdcfgs.push_back(std::make_pair(SHRPX_OPT_PRIVATE_KEY_PASSWD_FILE,
                                          optarg));
         break;
+      case 23:
+        // --no-via
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_NO_VIA, "yes"));
+        break;
+      case 24:
+        // --subcert
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_SUBCERT, optarg));
+        break;
+      case 25:
+        // --spdy-bridge
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_SPDY_BRIDGE, "yes"));
+        break;
+      case 26:
+        // --backend-http-proxy-uri
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_BACKEND_HTTP_PROXY_URI,
+                                         optarg));
+        break;
+      case 27:
+        // --backend-spdy-no-tls
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_BACKEND_SPDY_NO_TLS,
+                                         "yes"));
+        break;
+      case 28:
+        // --backend-spdy-proto
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_BACKEND_SPDY_PROTO,
+                                         optarg));
+        break;
+      case 29:
+        // --frontend-spdy-no-tls
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_FRONTEND_SPDY_NO_TLS,
+                                         "yes"));
+        break;
+      case 30:
+        // --frontend-spdy-proto
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_FRONTEND_SPDY_PROTO,
+                                         optarg));
+        break;
+      case 31:
+        // --backend-tls-sni-field
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_BACKEND_TLS_SNI_FIELD,
+                                         optarg));
+        break;
+      case 32:
+        // --honor-cipher-order
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_HONOR_CIPHER_ORDER,
+                                         "yes"));
+        break;
+      case 33:
+        // --dh-param-file
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_DH_PARAM_FILE, optarg));
+        break;
+      case 34:
+        // --read-rate
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_READ_RATE, optarg));
+        break;
+      case 35:
+        // --read-burst
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_READ_BURST, optarg));
+        break;
+      case 36:
+        // --write-rate
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_WRITE_RATE, optarg));
+        break;
+      case 37:
+        // --write-burst
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_WRITE_BURST, optarg));
+        break;
       default:
         break;
       }
@@ -724,6 +939,13 @@ int main(int argc, char **argv)
       break;
     }
   }
+
+  // Initialize OpenSSL before parsing options because we create
+  // SSL_CTX there.
+  OpenSSL_add_all_algorithms();
+  SSL_load_error_strings();
+  SSL_library_init();
+  ssl::setup_ssl_lock();
 
   if(conf_exists(get_config()->conf_path)) {
     if(load_config(get_config()->conf_path) == -1) {
@@ -747,17 +969,31 @@ int main(int argc, char **argv)
     }
   }
 
+  if(get_config()->cert_file && get_config()->private_key_file) {
+    mod_config()->default_ssl_ctx =
+      ssl::create_ssl_context(get_config()->private_key_file,
+                              get_config()->cert_file);
+    if(get_config()->cert_tree) {
+      if(ssl::cert_lookup_tree_add_cert_from_file(get_config()->cert_tree,
+                                                  get_config()->default_ssl_ctx,
+                                                  get_config()->cert_file)
+         == -1) {
+        LOG(FATAL) << "Failed to parse command-line argument.";
+        exit(EXIT_FAILURE);
+      }
+    }
+  }
+
   if(get_config()->backend_ipv4 && get_config()->backend_ipv6) {
     LOG(FATAL) << "--backend-ipv4 and --backend-ipv6 cannot be used at the "
                << "same time.";
     exit(EXIT_FAILURE);
   }
 
-  int mode = get_config()->spdy_proxy |
-    (get_config()->client_proxy << 1) | (get_config()->client << 2);
-  if(mode != 0 && mode != 1 && mode != 2 && mode != 4) {
-    LOG(FATAL) << "--spdy-proxy, --client-proxy and --client cannot be used "
-               << "at the same time.";
+  if(get_config()->spdy_proxy + get_config()->spdy_bridge +
+     get_config()->client_proxy + get_config()->client > 1) {
+    LOG(FATAL) << "--spdy-proxy, --spdy-bridge, --client-proxy and --client "
+               << "cannot be used at the same time.";
     exit(EXIT_FAILURE);
   }
 
@@ -765,7 +1001,13 @@ int main(int argc, char **argv)
     mod_config()->client_mode = true;
   }
 
-  if(!get_config()->client_mode) {
+  if(get_config()->client_mode || get_config()->spdy_bridge) {
+    mod_config()->downstream_proto = PROTO_SPDY;
+  } else {
+    mod_config()->downstream_proto = PROTO_HTTP;
+  }
+
+  if(!get_config()->client_mode && !get_config()->spdy_upstream_no_tls) {
     if(!get_config()->private_key_file || !get_config()->cert_file) {
       print_usage(std::cerr);
       LOG(FATAL) << "Too few arguments";
@@ -776,22 +1018,37 @@ int main(int argc, char **argv)
   char hostport[NI_MAXHOST+16];
   bool downstream_ipv6_addr =
     is_ipv6_numeric_addr(get_config()->downstream_host);
-  if(get_config()->downstream_port == 80) {
-    snprintf(hostport, sizeof(hostport), "%s%s%s",
-             downstream_ipv6_addr ? "[" : "",
-             get_config()->downstream_host,
-             downstream_ipv6_addr ? "]" : "");
-  } else {
-    snprintf(hostport, sizeof(hostport), "%s%s%s:%u",
-             downstream_ipv6_addr ? "[" : "",
-             get_config()->downstream_host,
-             downstream_ipv6_addr ? "]" : "",
-             get_config()->downstream_port);
-  }
+  snprintf(hostport, sizeof(hostport), "%s%s%s:%u",
+           downstream_ipv6_addr ? "[" : "",
+           get_config()->downstream_host,
+           downstream_ipv6_addr ? "]" : "",
+           get_config()->downstream_port);
   set_config_str(&mod_config()->downstream_hostport, hostport);
 
-  if(cache_downstream_host_address() == -1) {
+  if(LOG_ENABLED(INFO)) {
+    LOG(INFO) << "Resolving backend address";
+  }
+  if(resolve_hostname(&mod_config()->downstream_addr,
+                      &mod_config()->downstream_addrlen,
+                      get_config()->downstream_host,
+                      get_config()->downstream_port,
+                      get_config()->backend_ipv4 ? AF_INET :
+                      (get_config()->backend_ipv6 ?
+                       AF_INET6 : AF_UNSPEC)) == -1) {
     exit(EXIT_FAILURE);
+  }
+
+  if(get_config()->downstream_http_proxy_host) {
+    if(LOG_ENABLED(INFO)) {
+      LOG(INFO) << "Resolving backend http proxy address";
+    }
+    if(resolve_hostname(&mod_config()->downstream_http_proxy_addr,
+                        &mod_config()->downstream_http_proxy_addrlen,
+                        get_config()->downstream_http_proxy_host,
+                        get_config()->downstream_http_proxy_port,
+                        AF_UNSPEC) == -1) {
+      exit(EXIT_FAILURE);
+    }
   }
 
   if(get_config()->syslog) {
@@ -800,19 +1057,17 @@ int main(int argc, char **argv)
     mod_config()->use_syslog = true;
   }
 
-  if(get_config()->pid_file) {
-    save_pid();
-  }
+  mod_config()->rate_limit_cfg = ev_token_bucket_cfg_new
+    (get_rate_limit(get_config()->read_rate),
+     get_rate_limit(get_config()->read_burst),
+     get_rate_limit(get_config()->write_rate),
+     get_rate_limit(get_config()->write_burst),
+     0);
 
   struct sigaction act;
   memset(&act, 0, sizeof(struct sigaction));
   act.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &act, 0);
-
-  OpenSSL_add_all_algorithms();
-  SSL_load_error_strings();
-  SSL_library_init();
-  ssl::setup_ssl_lock();
 
   event_loop();
 

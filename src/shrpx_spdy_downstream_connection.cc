@@ -30,7 +30,7 @@
 
 #include <event2/bufferevent_ssl.h>
 
-#include <http-parser/http_parser.h>
+#include "http-parser/http_parser.h"
 
 #include "shrpx_client_handler.h"
 #include "shrpx_upstream.h"
@@ -56,15 +56,25 @@ SpdyDownstreamConnection::SpdyDownstreamConnection
 
 SpdyDownstreamConnection::~SpdyDownstreamConnection()
 {
+  if(LOG_ENABLED(INFO)) {
+    DCLOG(INFO, this) << "Deleting";
+  }
   if(request_body_buf_) {
     evbuffer_free(request_body_buf_);
   }
-  // TODO need RST_STREAM?
+  if(downstream_) {
+    if(submit_rst_stream(downstream_) == 0) {
+      spdy_->notify();
+    }
+  }
   spdy_->remove_downstream_connection(this);
   // Downstream and DownstreamConnection may be deleted
   // asynchronously.
   if(downstream_) {
     downstream_->set_downstream_connection(0);
+  }
+  if(LOG_ENABLED(INFO)) {
+    DCLOG(INFO, this) << "Deleted";
   }
 }
 
@@ -89,7 +99,7 @@ int SpdyDownstreamConnection::init_request_body_buf()
 
 int SpdyDownstreamConnection::attach_downstream(Downstream *downstream)
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DCLOG(INFO, this) << "Attaching to DOWNSTREAM:" << downstream;
   }
   if(init_request_body_buf() == -1) {
@@ -107,15 +117,39 @@ int SpdyDownstreamConnection::attach_downstream(Downstream *downstream)
 
 void SpdyDownstreamConnection::detach_downstream(Downstream *downstream)
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DCLOG(INFO, this) << "Detaching from DOWNSTREAM:" << downstream;
+  }
+  if(submit_rst_stream(downstream) == 0) {
+    spdy_->notify();
   }
   downstream->set_downstream_connection(0);
   downstream_ = 0;
 
-  // TODO do something to SpdySession? RST_STREAM?
-
   client_handler_->pool_downstream_connection(this);
+}
+
+int SpdyDownstreamConnection::submit_rst_stream(Downstream *downstream)
+{
+  int rv = -1;
+  if(spdy_->get_state() == SpdySession::CONNECTED &&
+     downstream->get_downstream_stream_id() != -1) {
+    switch(downstream->get_response_state()) {
+    case Downstream::MSG_RESET:
+    case Downstream::MSG_COMPLETE:
+      break;
+    default:
+      if(LOG_ENABLED(INFO)) {
+        DCLOG(INFO, this) << "Submit RST_STREAM for DOWNSTREAM:"
+                          << downstream << ", stream_id="
+                          << downstream->get_downstream_stream_id();
+      }
+      rv = spdy_->submit_rst_stream(this,
+                                    downstream->get_downstream_stream_id(),
+                                    SPDYLAY_INTERNAL_ERROR);
+    }
+  }
+  return rv;
 }
 
 namespace {
@@ -145,15 +179,32 @@ ssize_t spdy_data_read_callback(spdylay_session *session,
   for(;;) {
     nread = evbuffer_remove(body, buf, length);
     if(nread == 0) {
-      if(downstream->get_request_state() == Downstream::MSG_COMPLETE) {
+      // If CONNECT request failed, set *eof = 1.
+      if(downstream->get_request_state() == Downstream::MSG_COMPLETE ||
+         (downstream->get_response_state() == Downstream::HEADER_COMPLETE &&
+          downstream->get_request_method() == "CONNECT" &&
+          !downstream->tunnel_established())) {
         *eof = 1;
         break;
       } else {
-        if(downstream->get_upstream()->resume_read(SHRPX_NO_BUFFER) == -1) {
+        // This is important because it will handle flow control
+        // stuff.
+        if(downstream->get_upstream()->resume_read(SHRPX_NO_BUFFER,
+                                                   downstream) == -1) {
           // In this case, downstream may be deleted.
           return SPDYLAY_ERR_DEFERRED;
         }
+        // Check dconn is still alive because Upstream::resume_read()
+        // may delete downstream which will delete dconn.
+        if(sd->dconn == 0) {
+          return SPDYLAY_ERR_DEFERRED;
+        }
         if(evbuffer_get_length(body) == 0) {
+          // Check get_request_state() == MSG_COMPLETE just in case
+          if(downstream->get_request_state() == Downstream::MSG_COMPLETE) {
+            *eof = 1;
+            break;
+          }
           return SPDYLAY_ERR_DEFERRED;
         }
       }
@@ -162,16 +213,6 @@ ssize_t spdy_data_read_callback(spdylay_session *session,
     }
   }
   return nread;
-}
-} // namespace
-
-namespace {
-void copy_url_component(std::string& dest, http_parser_url *u, int field,
-                        const char* url)
-{
-  if(u->field_set & (1 << field)) {
-    dest.assign(url+u->field_data[field].off, u->field_data[field].len);
-  }
 }
 } // namespace
 
@@ -187,15 +228,19 @@ int SpdyDownstreamConnection::push_request_headers()
     return 0;
   }
   size_t nheader = downstream_->get_request_headers().size();
-  // 14 means :method, :scheme, :path, :version and possible via,
-  // x-forwarded-for and x-forwarded-proto header fields. We rename
-  // host header field as :host.
-  const char **nv = new const char*[nheader * 2 + 14 + 1];
+  // 12 means :method, :scheme, :path, :version and possible via and
+  // x-forwarded-for header fields. We rename host header field as
+  // :host.
+  const char **nv = new const char*[nheader * 2 + 12 + 1];
   size_t hdidx = 0;
   std::string via_value;
   std::string xff_value;
   std::string scheme, path, query;
-  if(downstream_->get_request_method() != "CONNECT") {
+  if(downstream_->get_request_method() == "CONNECT") {
+    // No :scheme header field for CONNECT method.
+    nv[hdidx++] = ":path";
+    nv[hdidx++] = downstream_->get_request_path().c_str();
+  } else {
     http_parser_url u;
     const char *url = downstream_->get_request_path().c_str();
     memset(&u, 0, sizeof(u));
@@ -203,32 +248,36 @@ int SpdyDownstreamConnection::push_request_headers()
                                downstream_->get_request_path().size(),
                                0, &u);
     if(rv == 0) {
-      copy_url_component(scheme, &u, UF_SCHEMA, url);
-      copy_url_component(path, &u, UF_PATH, url);
-      copy_url_component(query, &u, UF_QUERY, url);
+      http::copy_url_component(scheme, &u, UF_SCHEMA, url);
+      http::copy_url_component(path, &u, UF_PATH, url);
+      http::copy_url_component(query, &u, UF_QUERY, url);
+      if(path.empty()) {
+        path = "/";
+      }
       if(!query.empty()) {
         path += "?";
         path += query;
       }
     }
+    nv[hdidx++] = ":scheme";
+    if(scheme.empty()) {
+      // The default scheme is http. For SPDY upstream, the path must
+      // be absolute URI, so scheme should be provided.
+      nv[hdidx++] = "http";
+    } else {
+      nv[hdidx++] = scheme.c_str();
+    }
+    nv[hdidx++] = ":path";
+    if(path.empty()) {
+      nv[hdidx++] = downstream_->get_request_path().c_str();
+    } else {
+      nv[hdidx++] = path.c_str();
+    }
   }
 
   nv[hdidx++] = ":method";
   nv[hdidx++] = downstream_->get_request_method().c_str();
-  nv[hdidx++] = ":scheme";
-  if(scheme.empty()) {
-    // Currently, the user of this downstream connecion is HTTP
-    // only.
-    nv[hdidx++] = "http";
-  } else {
-    nv[hdidx++] = scheme.c_str();
-  }
-  nv[hdidx++] = ":path";
-  if(downstream_->get_request_method() == "CONNECT" || path.empty()) {
-    nv[hdidx++] = downstream_->get_request_path().c_str();
-  } else {
-    nv[hdidx++] = path.c_str();
-  }
+
   nv[hdidx++] = ":version";
   nv[hdidx++] = "HTTP/1.1";
   bool chunked_encoding = false;
@@ -245,7 +294,8 @@ int SpdyDownstreamConnection::push_request_headers()
               util::strieq((*i).first.c_str(), "connection") ||
               util:: strieq((*i).first.c_str(), "proxy-connection")) {
       // These are ignored
-    } else if(util::strieq((*i).first.c_str(), "via")) {
+    } else if(!get_config()->no_via &&
+              util::strieq((*i).first.c_str(), "via")) {
       via_value = (*i).second;
     } else if(util::strieq((*i).first.c_str(), "x-forwarded-for")) {
       xff_value = (*i).second;
@@ -276,22 +326,17 @@ int SpdyDownstreamConnection::push_request_headers()
     nv[hdidx++] = "x-forwarded-for";
     nv[hdidx++] = xff_value.c_str();
   }
-  if(downstream_->get_request_method() != "CONNECT") {
-    // Currently, HTTP connection is used as upstream, so we just
-    // specify it here.
-    nv[hdidx++] = "x-forwarded-proto";
-    nv[hdidx++] = "http";
+  if(!get_config()->no_via) {
+    if(!via_value.empty()) {
+      via_value += ", ";
+    }
+    via_value += http::create_via_header_value
+      (downstream_->get_request_major(), downstream_->get_request_minor());
+    nv[hdidx++] = "via";
+    nv[hdidx++] = via_value.c_str();
   }
-
-  if(!via_value.empty()) {
-    via_value += ", ";
-  }
-  via_value += http::create_via_header_value(downstream_->get_request_major(),
-                                             downstream_->get_request_minor());
-  nv[hdidx++] = "via";
-  nv[hdidx++] = via_value.c_str();
   nv[hdidx++] = 0;
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     std::stringstream ss;
     for(size_t i = 0; nv[i]; i += 2) {
       ss << TTY_HTTP_HD << nv[i] << TTY_RST << ": " << nv[i+1] << "\n";
@@ -349,17 +394,7 @@ int SpdyDownstreamConnection::end_upload_data()
   return 0;
 }
 
-int SpdyDownstreamConnection::on_read()
-{
-  return 0;
-}
-
-int SpdyDownstreamConnection::on_write()
-{
-  return 0;
-}
-
-int SpdyDownstreamConnection::on_upstream_write()
+int SpdyDownstreamConnection::resume_read(IOCtrlReason reason)
 {
   int rv;
   if(spdy_->get_state() == SpdySession::CONNECTED &&
@@ -376,6 +411,16 @@ int SpdyDownstreamConnection::on_upstream_write()
   return 0;
 }
 
+int SpdyDownstreamConnection::on_read()
+{
+  return 0;
+}
+
+int SpdyDownstreamConnection::on_write()
+{
+  return 0;
+}
+
 evbuffer* SpdyDownstreamConnection::get_request_body_buf() const
 {
   return request_body_buf_;
@@ -383,7 +428,12 @@ evbuffer* SpdyDownstreamConnection::get_request_body_buf() const
 
 void SpdyDownstreamConnection::attach_stream_data(StreamData *sd)
 {
-  assert(sd_ == 0 && sd->dconn == 0);
+  // It is possible sd->dconn is not NULL. sd is detached when
+  // on_stream_close_callback. Before that, after MSG_COMPLETE is set
+  // to Downstream::set_response_state(), upstream's readcb is called
+  // and execution path eventually could reach here. Since the
+  // response was already handled, we just detach sd.
+  detach_stream_data();
   sd_ = sd;
   sd_->dconn = this;
 }

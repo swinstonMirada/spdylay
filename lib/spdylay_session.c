@@ -444,6 +444,7 @@ int spdylay_session_add_frame(spdylay_session *session,
     free(item);
     return r;
   }
+  item->inipri = item->pri;
   return 0;
 }
 
@@ -500,8 +501,13 @@ int spdylay_session_close_stream(spdylay_session *session, int32_t stream_id,
 {
   spdylay_stream *stream = spdylay_session_get_stream(session, stream_id);
   if(stream) {
-    if(stream->state != SPDYLAY_STREAM_INITIAL &&
-       session->callbacks.on_stream_close_callback) {
+    /* We call on_stream_close_callback even if stream->state is
+       SPDYLAY_STREAM_INITIAL. This will happen while sending request
+       HEADERS, a local endpoint receives RST_STREAM for that
+       stream. It may be PROTOCOL_ERROR, but without notifying stream
+       closure will hang the stream in a local endpoint.
+     */
+    if(session->callbacks.on_stream_close_callback) {
       session->callbacks.on_stream_close_callback(session, stream_id,
                                                   status_code,
                                                   session->user_data);
@@ -586,8 +592,7 @@ static int spdylay_session_predicate_syn_stream_send
   if(frame->assoc_stream_id != 0) {
     /* Check associated stream is active. */
     /* We assume here that if frame->assoc_stream_id != 0,
-       session->server is always 1 and frame->assoc_stream_id is
-       odd. */
+       session->server is always 1. */
     if(spdylay_session_get_stream(session, frame->assoc_stream_id) ==
        NULL) {
       return SPDYLAY_ERR_STREAM_CLOSED;
@@ -966,8 +971,6 @@ static ssize_t spdylay_session_prep_frame(spdylay_session *session,
           } else {
             return r;
           }
-        } else if(r < 0) {
-          return r;
         }
         frame->syn_stream.slot = slot_index;
       }
@@ -1250,6 +1253,20 @@ spdylay_outbound_item* spdylay_session_pop_next_ob_item
 }
 
 /*
+ * Adjust priority of item so that the higher priority long DATA
+ * frames don't starve lower priority streams.
+ */
+static void spdylay_outbound_item_adjust_pri(spdylay_session *session,
+                                             spdylay_outbound_item *item)
+{
+  if(item->pri > spdylay_session_get_pri_lowest(session)) {
+    item->pri = item->inipri;
+  } else {
+    ++item->pri;
+  }
+}
+
+/*
  * Called after a frame is sent.
  *
  * This function returns 0 if it succeeds, or one of the following
@@ -1403,6 +1420,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
     } else {
       spdylay_outbound_item* next_item;
       next_item = spdylay_session_get_next_ob_item(session);
+      spdylay_outbound_item_adjust_pri(session, session->aob.item);
       /* If priority of this stream is higher or equal to other stream
          waiting at the top of the queue, we continue to send this
          data. */
@@ -1644,7 +1662,6 @@ static int spdylay_session_validate_syn_stream(spdylay_session *session,
       return SPDYLAY_INVALID_STREAM;
     }
     if((frame->hd.flags & SPDYLAY_CTRL_FLAG_UNIDIRECTIONAL) == 0 ||
-       frame->assoc_stream_id % 2 == 0 ||
        spdylay_session_get_stream(session, frame->assoc_stream_id) == NULL) {
       /* It seems spdy/2 spec does not say which status code should be
          returned in these cases. */
@@ -2374,10 +2391,15 @@ int spdylay_session_on_data_received(spdylay_session *session,
         }
       }
     } else {
-      status_code = SPDYLAY_PROTOCOL_ERROR;
+      if(stream->state != SPDYLAY_STREAM_CLOSING) {
+        status_code = SPDYLAY_PROTOCOL_ERROR;
+      }
     }
   } else {
-    status_code = SPDYLAY_INVALID_STREAM;
+    /* This should be treated as stream error, but it results in lots
+       of RST_STREAM. So just ignore frame against nonexistent stream
+       for now. */
+    /* status_code = SPDYLAY_INVALID_STREAM; */
   }
   if(status_code != 0) {
     r = spdylay_session_add_rst_stream(session, stream_id, status_code);

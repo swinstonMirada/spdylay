@@ -58,7 +58,10 @@ public:
   int submit_request(const std::string& scheme,
                      const std::string& hostport, const std::string& path,
                      const std::map<std::string,std::string>& headers,
-                     uint8_t pri, void *stream_user_data);
+                     uint8_t pri,
+                     const spdylay_data_provider *data_prd,
+                     int64_t data_length,
+                     void *stream_user_data);
   int submit_settings(int flags, spdylay_settings_entry *iv, size_t niv);
   bool would_block();
   void* user_data();
@@ -147,6 +150,8 @@ void reset_timer();
 
 void get_timer(timeval *tv);
 
+int get_time(timeval *tv);
+
 void print_timer();
 
 enum {
@@ -155,6 +160,10 @@ enum {
 };
 
 uint8_t get_ssl_io_demand(SSL *ssl, ssize_t r);
+
+// Setting true will print characters with ANSI color escape codes
+// when printing SPDY frames. This function changes a static variable.
+void set_color_output(bool f);
 
 } // namespace spdylay
 

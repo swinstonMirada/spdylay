@@ -40,7 +40,6 @@
 #include <zlib.h>
 
 #include "spdylay_ssl.h"
-#include "uri.h"
 #include "util.h"
 #include "EventPoll.h"
 
@@ -60,7 +59,8 @@ const std::string DEFAULT_HTML = "index.html";
 const std::string SPDYD_SERVER = "spdyd spdylay/" SPDYLAY_VERSION;
 } // namespace
 
-Config::Config(): verbose(false), daemon(false), port(0), data_ptr(0),
+Config::Config(): verbose(false), daemon(false), port(0),
+                  on_request_recv_callback(0), data_ptr(0),
                   version(0), verify_client(false), no_tls(false)
 {}
 
@@ -187,7 +187,7 @@ SpdyEventHandler::SpdyEventHandler(const Config* config,
   assert(r == 0);
   spdylay_settings_entry entry;
   entry.settings_id = SPDYLAY_SETTINGS_MAX_CONCURRENT_STREAMS;
-  entry.value = SPDYLAY_INITIAL_MAX_CONCURRENT_STREAMS;
+  entry.value = 100;
   entry.flags = SPDYLAY_ID_FLAG_SETTINGS_NONE;
   r = spdylay_submit_settings(session_, SPDYLAY_FLAG_SETTINGS_NONE,
                               &entry, 1);
@@ -332,7 +332,7 @@ int SpdyEventHandler::submit_response
   nv[5] = SPDYD_SERVER.c_str();
   nv[6] = "date";
   nv[7] = date_str.c_str();
-  for(int i = 0; i < (int)headers.size(); ++i) {
+  for(size_t i = 0; i < headers.size(); ++i) {
     nv[8+i*2] = headers[i].first.c_str();
     nv[8+i*2+1] = headers[i].second.c_str();
   }
@@ -492,7 +492,7 @@ void prepare_response(Request *req, SpdyEventHandler *hd)
   bool host_found = false;
   time_t last_mod = 0;
   bool last_mod_found = false;
-  for(int i = 0; i < (int)req->headers.size(); ++i) {
+  for(size_t i = 0; i < req->headers.size(); ++i) {
     const std::string &field = req->headers[i].first;
     const std::string &value = req->headers[i].second;
     if(!url_found && field == ":path") {
@@ -516,7 +516,7 @@ void prepare_response(Request *req, SpdyEventHandler *hd)
     prepare_status_response(req, hd, STATUS_400);
     return;
   }
-  std::string::size_type query_pos = url.find("?");
+  size_t query_pos = url.find("?");
   if(query_pos != std::string::npos) {
     // Do not response to this request to allow clients to test timeouts.
     if (url.find("spdyd_do_not_respond_to_req=yes",
@@ -1008,6 +1008,9 @@ int SpdyServer::run()
   bool bind_ok = false;
   for(int i = 0; i < 2; ++i) {
     const char* ipv = (families[i] == AF_INET ? "IPv4" : "IPv6");
+    if(sfd_[i] == -1) {
+      continue;
+    }
     ListenEventHandler *listen_hd = new ListenEventHandler(config_,
                                                            sfd_[i],
                                                            &session_id_seed);
@@ -1015,6 +1018,7 @@ int SpdyServer::run()
       std::cerr <<  ipv << ": Adding listening socket to poll failed."
                 << std::endl;
       delete listen_hd;
+      continue;
     }
     sessions.add_handler(listen_hd);
     bind_ok = true;

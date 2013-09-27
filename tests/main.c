@@ -210,14 +210,24 @@ int main(int argc, char* argv[])
                    test_spdylay_frame_nv_downcase) ||
       !CU_add_test(pSuite, "frame_pack_nv_duplicate_keys",
                    test_spdylay_frame_pack_nv_duplicate_keys) ||
+      !CU_add_test(pSuite, "frame_pack_nv_empty_value_spdy2",
+                   test_spdylay_frame_pack_nv_empty_value_spdy2) ||
+      !CU_add_test(pSuite, "frame_pack_nv_empty_value_spdy3",
+                   test_spdylay_frame_pack_nv_empty_value_spdy3) ||
       !CU_add_test(pSuite, "frame_nv_2to3", test_spdylay_frame_nv_2to3) ||
       !CU_add_test(pSuite, "frame_nv_3to2", test_spdylay_frame_nv_3to2) ||
       !CU_add_test(pSuite, "frame_unpack_nv_check_name_spdy2",
                    test_spdylay_frame_unpack_nv_check_name_spdy2) ||
       !CU_add_test(pSuite, "frame_unpack_nv_check_name_spdy3",
                    test_spdylay_frame_unpack_nv_check_name_spdy3) ||
+      !CU_add_test(pSuite, "frame_unpack_nv_last_empty_value_spdy2",
+                   test_spdylay_frame_unpack_nv_last_empty_value_spdy2) ||
+      !CU_add_test(pSuite, "frame_unpack_nv_last_empty_value_spdy3",
+                   test_spdylay_frame_unpack_nv_last_empty_value_spdy3) ||
       !CU_add_test(pSuite, "frame_nv_set_origin",
                    test_spdylay_frame_nv_set_origin) ||
+      !CU_add_test(pSuite, "frame_nv_check_null",
+                   test_spdylay_frame_nv_check_null) ||
       !CU_add_test(pSuite, "stream_add_pushed_stream",
                    test_spdylay_stream_add_pushed_stream) ||
       !CU_add_test(pSuite, "client_cert_vector_find",

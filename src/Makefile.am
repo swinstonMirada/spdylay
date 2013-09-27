@@ -21,22 +21,31 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+bin_PROGRAMS =
+check_PROGRAMS =
+TESTS =
+
 if ENABLE_SRC
 
 AM_CFLAGS = -Wall
 AM_CPPFLAGS = -Wall -I$(srcdir)/../lib/includes -I$(builddir)/../lib/includes \
 	@OPENSSL_CFLAGS@ @XML_CPPFLAGS@ @LIBEVENT_OPENSSL_CFLAGS@ @DEFS@
-AM_LDFLAGS = @OPENSSL_LIBS@ @XML_LIBS@ @LIBEVENT_OPENSSL_LIBS@ -pthread
+AM_LDFLAGS = @OPENSSL_LIBS@ @XML_LIBS@ @LIBEVENT_OPENSSL_LIBS@ @SRC_LIBS@
+
 LDADD = $(top_builddir)/lib/libspdylay.la
 
-bin_PROGRAMS = spdycat spdyd
+bin_PROGRAMS += spdycat
+
+if ENABLE_SPDYD
+bin_PROGRAMS += spdyd
+endif # ENABLE_SPDYD
 
 if HAVE_LIBEVENT_OPENSSL
 bin_PROGRAMS += shrpx
 endif # HAVE_LIBEVENT_OPENSSL
 
-HELPER_OBJECTS = uri.cc util.cc spdylay_ssl.cc
-HELPER_HFILES = uri.h util.h spdylay_ssl.h spdylay_config.h
+HELPER_OBJECTS = util.cc timegm.c spdylay_ssl.cc
+HELPER_HFILES = util.h timegm.h spdylay_ssl.h spdylay_config.h
 
 EVENT_OBJECTS =
 EVENT_HFILES = EventPoll.h EventPollEvent.h
@@ -58,21 +67,24 @@ if HAVE_LIBXML2
 HTML_PARSER_OBJECTS += HtmlParser.cc
 endif # HAVE_LIBXML2
 
+spdycat_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} spdycat.cc \
+	${HTML_PARSER_OBJECTS} ${HTML_PARSER_HFILES} \
+	http-parser/http_parser.c http-parser/http_parser.h
+
+if ENABLE_SPDYD
 SPDY_SERVER_OBJECTS = SpdyServer.cc
 SPDY_SERVER_HFILES = SpdyServer.h
-
-spdycat_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} spdycat.cc \
-	${HTML_PARSER_OBJECTS} ${HTML_PARSER_HFILES}
 
 spdyd_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} \
 	${EVENT_OBJECTS} ${EVENT_HFILES} \
 	${SPDY_SERVER_OBJECTS} ${SPDY_SERVER_HFILES} \
 	spdyd.cc
+endif # ENABLE_SPDYD
 
 if HAVE_LIBEVENT_OPENSSL
-shrpx_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} \
+SHRPX_SRCS = \
+	util.cc util.h timegm.c timegm.h base64.h \
 	shrpx_config.cc shrpx_config.h \
-	shrpx.cc shrpx.h \
 	shrpx_error.h \
 	shrpx_listen_handler.cc shrpx_listen_handler.h \
 	shrpx_client_handler.cc shrpx_client_handler.h \
@@ -93,6 +105,21 @@ shrpx_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} \
 	shrpx_worker.cc shrpx_worker.h \
 	shrpx_accesslog.cc shrpx_accesslog.h\
 	http-parser/http_parser.c http-parser/http_parser.h
+
+shrpx_SOURCES = ${SHRPX_SRCS} shrpx.cc shrpx.h
+
+if HAVE_CUNIT
+check_PROGRAMS += shrpx-unittest
+shrpx_unittest_SOURCES = shrpx-unittest.cc \
+	shrpx_ssl_test.cc shrpx_ssl_test.h\
+	${SHRPX_SRCS}
+shrpx_unittest_CPPFLAGS = ${AM_CPPFLAGS}\
+	 -DSPDYLAY_TESTS_DIR=\"$(top_srcdir)/tests\"
+shrpx_unittest_LDFLAGS = -static @OPENSSL_LIBS@ @LIBEVENT_OPENSSL_LIBS@\
+	@SRC_LIBS@ @CUNIT_LIBS@ @TESTS_LIBS@
+TESTS += shrpx-unittest
+endif # HAVE_CUNIT
+
 endif # HAVE_LIBEVENT_OPENSSL
 
 endif # ENABLE_SRC

@@ -101,10 +101,9 @@ static ssize_t scripted_recv_callback(spdylay_session *session,
   size_t wlen = df->feedseq[df->seqidx] > len ? len : df->feedseq[df->seqidx];
   memcpy(data, df->datamark, wlen);
   df->datamark += wlen;
-  if(wlen <= len) {
+  df->feedseq[df->seqidx] -= wlen;
+  if(df->feedseq[df->seqidx] == 0) {
     ++df->seqidx;
-  } else {
-    df->feedseq[df->seqidx] -= wlen;
   }
   return wlen;
 }
@@ -977,11 +976,6 @@ void test_spdylay_submit_syn_stream(void)
   CU_ASSERT(1 == OB_CTRL(item)->syn_stream.assoc_stream_id);
   CU_ASSERT(3 == OB_CTRL(item)->syn_stream.pri);
 
-  /* Invalid assoc-stream-ID */
-  CU_ASSERT(SPDYLAY_ERR_INVALID_ARGUMENT ==
-            spdylay_submit_syn_stream(session, SPDYLAY_CTRL_FLAG_FIN, 2, 3,
-                                      nv, NULL));
-
   spdylay_session_del(session);
 }
 
@@ -1361,9 +1355,9 @@ void test_spdylay_session_on_data_received(void)
   CU_ASSERT(0 == spdylay_session_on_data_received(session,
                                                   SPDYLAY_DATA_FLAG_NONE,
                                                   4096, stream_id));
+  /* In this case, no RST_STREAM */
   top = spdylay_session_get_ob_pq_top(session);
-  CU_ASSERT(SPDYLAY_RST_STREAM == OB_CTRL_TYPE(top));
-  CU_ASSERT(SPDYLAY_INVALID_STREAM == OB_CTRL(top)->rst_stream.status_code);
+  CU_ASSERT(NULL == top);
 
   spdylay_session_del(session);
 }
@@ -2650,7 +2644,7 @@ void test_spdylay_session_recv_data(void)
   spdylay_put_uint32be(data, 1);
   spdylay_put_uint32be(data+4, 4096);
 
-  /* stream 1 is not opened, so it must be responded with RST_STREAM */
+  /* stream 1 is not opened, and it is ignored. */
   ud.data_chunk_recv_cb_called = 0;
   ud.data_recv_cb_called = 0;
   rv = spdylay_session_mem_recv(session, data, 8+4096);
@@ -2659,7 +2653,7 @@ void test_spdylay_session_recv_data(void)
   CU_ASSERT(0 == ud.data_chunk_recv_cb_called);
   CU_ASSERT(0 == ud.data_recv_cb_called);
   item = spdylay_session_get_next_ob_item(session);
-  CU_ASSERT(SPDYLAY_RST_STREAM == OB_CTRL_TYPE(item));
+  CU_ASSERT(NULL == item);
 
   CU_ASSERT(0 == spdylay_session_send(session));
 

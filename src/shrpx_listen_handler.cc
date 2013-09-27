@@ -40,10 +40,11 @@
 
 namespace shrpx {
 
-ListenHandler::ListenHandler(event_base *evbase)
+ListenHandler::ListenHandler(event_base *evbase, SSL_CTX *sv_ssl_ctx,
+                             SSL_CTX *cl_ssl_ctx)
   : evbase_(evbase),
-    ssl_ctx_(get_config()->client_mode ?
-             ssl::create_ssl_client_context() : ssl::create_ssl_context()),
+    sv_ssl_ctx_(sv_ssl_ctx),
+    cl_ssl_ctx_(cl_ssl_ctx),
     worker_round_robin_cnt_(0),
     workers_(0),
     num_worker_(0),
@@ -66,13 +67,14 @@ void ListenHandler::create_worker_thread(size_t num)
     WorkerInfo *info = &workers_[num_worker_];
     rv = socketpair(AF_UNIX, SOCK_STREAM, 0, info->sv);
     if(rv == -1) {
-      LLOG(ERROR, this) << "socketpair() failed: " << strerror(errno);
+      LLOG(ERROR, this) << "socketpair() failed: errno=" << errno;
       continue;
     }
-    info->ssl_ctx = ssl_ctx_;
+    info->sv_ssl_ctx = sv_ssl_ctx_;
+    info->cl_ssl_ctx = cl_ssl_ctx_;
     rv = pthread_create(&thread, &attr, start_threaded_worker, info);
     if(rv != 0) {
-      LLOG(ERROR, this) << "pthread_create() failed: " << strerror(rv);
+      LLOG(ERROR, this) << "pthread_create() failed: errno=" << rv;
       for(size_t j = 0; j < 2; ++j) {
         close(info->sv[j]);
       }
@@ -81,7 +83,7 @@ void ListenHandler::create_worker_thread(size_t num)
     bufferevent *bev = bufferevent_socket_new(evbase_, info->sv[0],
                                               BEV_OPT_DEFER_CALLBACKS);
     info->bev = bev;
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       LLOG(INFO, this) << "Created thread #" << num_worker_;
     }
     ++num_worker_;
@@ -91,15 +93,13 @@ void ListenHandler::create_worker_thread(size_t num)
 int ListenHandler::accept_connection(evutil_socket_t fd,
                                      sockaddr *addr, int addrlen)
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     LLOG(INFO, this) << "Accepted connection. fd=" << fd;
   }
   if(num_worker_ == 0) {
-    ClientHandler* client =
-      ssl::accept_ssl_connection(evbase_, ssl_ctx_, fd, addr, addrlen);
-    if(get_config()->client_mode) {
-      client->set_spdy_session(spdy_);
-    }
+    ClientHandler* client = ssl::accept_connection(evbase_, sv_ssl_ctx_,
+                                                   fd, addr, addrlen);
+    client->set_spdy_session(spdy_);
   } else {
     size_t idx = worker_round_robin_cnt_ % num_worker_;
     ++worker_round_robin_cnt_;
@@ -109,7 +109,10 @@ int ListenHandler::accept_connection(evutil_socket_t fd,
     memcpy(&wev.client_addr, addr, addrlen);
     wev.client_addrlen = addrlen;
     evbuffer *output = bufferevent_get_output(workers_[idx].bev);
-    evbuffer_add(output, &wev, sizeof(wev));
+    if(evbuffer_add(output, &wev, sizeof(wev)) != 0) {
+      LLOG(FATAL, this) << "evbuffer_add() failed";
+      return -1;
+    }
   }
   return 0;
 }
@@ -122,7 +125,7 @@ event_base* ListenHandler::get_evbase() const
 int ListenHandler::create_spdy_session()
 {
   int rv;
-  spdy_ = new SpdySession(evbase_, ssl_ctx_);
+  spdy_ = new SpdySession(evbase_, cl_ssl_ctx_);
   rv = spdy_->init_notification();
   return rv;
 }

@@ -142,8 +142,10 @@ void* Spdylay::user_data()
 int Spdylay::submit_request(const std::string& scheme,
                             const std::string& hostport,
                             const std::string& path,
-                            const std::map<std::string,std::string> &headers,
+                            const std::map<std::string,std::string>& headers,
                             uint8_t pri,
+                            const spdylay_data_provider *data_prd,
+                            int64_t data_length,
                             void *stream_user_data)
 {
   enum eStaticHeaderPosition
@@ -154,22 +156,27 @@ int Spdylay::submit_request(const std::string& scheme,
     POS_SCHEME,
     POS_HOST,
     POS_ACCEPT,
+    POS_ACCEPTENCODING,
     POS_USERAGENT
   };
 
   const char *static_nv[] = {
-    ":method", "GET",
+    ":method", data_prd ? "POST" : "GET",
     ":path", path.c_str(),
     ":version", "HTTP/1.1",
     ":scheme", scheme.c_str(),
     ":host", hostport.c_str(),
     "accept", "*/*",
+    "accept-encoding", "gzip, deflate",
     "user-agent", "spdylay/" SPDYLAY_VERSION
   };
 
   int hardcoded_entry_count = sizeof(static_nv) / sizeof(*static_nv);
   int header_count          = headers.size();
   int total_entry_count     = hardcoded_entry_count + header_count * 2;
+  if(data_prd) {
+    total_entry_count+=2;
+  }
 
   const char **nv = new const char*[total_entry_count + 1];
 
@@ -180,6 +187,14 @@ int Spdylay::submit_request(const std::string& scheme,
 
   int pos = hardcoded_entry_count;
 
+  std::string content_length_str;
+  if(data_prd) {
+    std::stringstream ss;
+    ss << data_length;
+    content_length_str = ss.str();
+    nv[pos++] = "content-length";
+    nv[pos++] = content_length_str.c_str();
+  }
   while( i != end ) {
     const char *key = (*i).first.c_str();
     const char *value = (*i).second.c_str();
@@ -193,15 +208,15 @@ int Spdylay::submit_request(const std::string& scheme,
       nv[POS_HOST*2+1] = value;
     }
     else {
-      nv[pos] = key;
-      nv[pos+1] = value;
-      pos += 2;
+      nv[pos++] = key;
+      nv[pos++] = value;
     }
     ++i;
   }
   nv[pos] = NULL;
 
-  int r = spdylay_submit_request(session_, pri, nv, NULL, stream_user_data);
+  int r = spdylay_submit_request(session_, pri, nv, data_prd,
+                                 stream_user_data);
 
   delete [] nv;
 
@@ -285,7 +300,7 @@ int nonblock_connect_to(const std::string& host, uint16_t port, int timeout)
       struct timeval tv1, tv2;
       struct pollfd pfd = {fd, POLLOUT, 0};
       if(timeout != -1) {
-        gettimeofday(&tv1, 0);
+        get_time(&tv1);
       }
       r = poll(&pfd, 1, timeout);
       if(r == 0) {
@@ -294,7 +309,7 @@ int nonblock_connect_to(const std::string& host, uint16_t port, int timeout)
         return -1;
       } else {
         if(timeout != -1) {
-          gettimeofday(&tv2, 0);
+          get_time(&tv2);
           timeout -= time_delta(tv2, tv1);
           if(timeout <= 0) {
             return -2;
@@ -461,12 +476,37 @@ void print_frame_attr_indent()
 }
 } // namespace
 
+namespace {
+bool color_output = false;
+} // namespace
+
+void set_color_output(bool f)
+{
+  color_output = f;
+}
+
+namespace {
+const char* ansi_esc(const char *code)
+{
+  return color_output ? code : "";
+}
+} // namespace
+
+namespace {
+const char* ansi_escend()
+{
+  return color_output ? "\033[0m" : "";
+}
+} // namespace
+
 void print_nv(char **nv)
 {
   int i;
   for(i = 0; nv[i]; i += 2) {
     print_frame_attr_indent();
-    printf("%s: %s\n", nv[i], nv[i+1]);
+    printf("%s%s%s: %s\n",
+           ansi_esc("\033[1;34m"), nv[i],
+           ansi_escend(), nv[i+1]);
   }
 }
 
@@ -474,7 +514,11 @@ void print_timer()
 {
   timeval tv;
   get_timer(&tv);
-  printf("[%3ld.%03ld]", tv.tv_sec, tv.tv_usec/1000);
+  printf("%s[%3ld.%03ld]%s",
+         ansi_esc("\033[33m"),
+         static_cast<long int>(tv.tv_sec),
+         static_cast<long int>(tv.tv_usec)/1000,
+         ansi_escend());
 }
 
 namespace {
@@ -485,10 +529,26 @@ void print_ctrl_hd(const spdylay_ctrl_hd& hd)
 }
 } // namespace
 
+enum print_type {
+  PRINT_SEND,
+  PRINT_RECV
+};
+
 namespace {
-void print_frame(spdylay_frame_type type, spdylay_frame *frame)
+const char* frame_name_ansi_esc(print_type ptype)
 {
-  printf("%s frame ", ctrl_names[type-1]);
+  return ansi_esc(ptype == PRINT_SEND ? "\033[1;35m" : "\033[1;36m");
+}
+} // namespace
+
+namespace {
+void print_frame(print_type ptype, spdylay_frame_type type,
+                 spdylay_frame *frame)
+{
+  printf("%s%s%s frame ",
+         frame_name_ansi_esc(ptype),
+         ctrl_names[type-1],
+         ansi_escend());
   print_ctrl_hd(frame->syn_stream.hd);
   switch(type) {
   case SPDYLAY_SYN_STREAM:
@@ -550,7 +610,7 @@ void on_ctrl_recv_callback
 {
   print_timer();
   printf(" recv ");
-  print_frame(type, frame);
+  print_frame(PRINT_RECV, type, frame);
   fflush(stdout);
 }
 
@@ -594,7 +654,7 @@ void on_invalid_ctrl_recv_callback
 {
   print_timer();
   printf(" [INVALID; status=%s] recv ", strstatus(status_code));
-  print_frame(type, frame);
+  print_frame(PRINT_RECV, type, frame);
   fflush(stdout);
 }
 
@@ -620,7 +680,10 @@ void on_ctrl_recv_parse_error_callback(spdylay_session *session,
                                        int error_code, void *user_data)
 {
   print_timer();
-  printf(" [PARSE_ERROR] recv %s frame\n", ctrl_names[type-1]);
+  printf(" [PARSE_ERROR] recv %s%s%s frame\n",
+         frame_name_ansi_esc(PRINT_RECV),
+         ctrl_names[type-1],
+         ansi_escend());
   print_frame_attr_indent();
   printf("Error: %s\n", spdylay_strerror(error_code));
   dump_header(head, headlen);
@@ -646,14 +709,16 @@ void on_ctrl_send_callback
 {
   print_timer();
   printf(" send ");
-  print_frame(type, frame);
+  print_frame(PRINT_SEND, type, frame);
   fflush(stdout);
 }
 
 namespace {
-void print_data_frame(uint8_t flags, int32_t stream_id, int32_t length)
+void print_data_frame(print_type ptype, uint8_t flags, int32_t stream_id,
+                      int32_t length)
 {
-  printf("DATA frame (stream_id=%d, flags=%d, length=%d)\n",
+  printf("%sDATA%s frame (stream_id=%d, flags=%d, length=%d)\n",
+         frame_name_ansi_esc(ptype), ansi_escend(),
          stream_id, flags, length);
 }
 } // namespace
@@ -664,7 +729,7 @@ void on_data_recv_callback
 {
   print_timer();
   printf(" recv ");
-  print_data_frame(flags, stream_id, length);
+  print_data_frame(PRINT_RECV, flags, stream_id, length);
   fflush(stdout);
 }
 
@@ -674,7 +739,7 @@ void on_data_send_callback
 {
   print_timer();
   printf(" send ");
-  print_data_frame(flags, stream_id, length);
+  print_data_frame(PRINT_SEND, flags, stream_id, length);
   fflush(stdout);
 }
 
@@ -765,7 +830,7 @@ int ssl_nonblock_handshake(SSL *ssl, int fd, int& timeout)
   timeval tv1, tv2;
   while(1) {
     if(timeout != -1) {
-      gettimeofday(&tv1, 0);
+      get_time(&tv1);
     }
     int rv = poll(&pfd, 1, timeout);
     if(rv == 0) {
@@ -780,7 +845,7 @@ int ssl_nonblock_handshake(SSL *ssl, int fd, int& timeout)
       return -1;
     } else if(rv < 0) {
       if(timeout != -1) {
-        gettimeofday(&tv2, 0);
+        get_time(&tv2);
         timeout -= time_delta(tv2, tv1);
         if(timeout <= 0) {
           return -2;
@@ -829,18 +894,32 @@ timeval base_tv;
 
 void reset_timer()
 {
-  gettimeofday(&base_tv, 0);
+  get_time(&base_tv);
 }
 
 void get_timer(timeval* tv)
 {
-  gettimeofday(tv, 0);
+  get_time(tv);
   tv->tv_usec -= base_tv.tv_usec;
   tv->tv_sec -= base_tv.tv_sec;
   if(tv->tv_usec < 0) {
     tv->tv_usec += 1000000;
     --tv->tv_sec;
   }
+}
+
+int get_time(timeval *tv)
+{
+  int rv;
+#ifdef HAVE_CLOCK_GETTIME
+  timespec ts;
+  rv = clock_gettime(CLOCK_MONOTONIC, &ts);
+  tv->tv_sec = ts.tv_sec;
+  tv->tv_usec = ts.tv_nsec/1000;
+#else // !HAVE_CLOCK_GETTIME
+  rv = gettimeofday(tv, 0);
+#endif // !HAVE_CLOCK_GETTIME
+  return rv;
 }
 
 } // namespace spdylay

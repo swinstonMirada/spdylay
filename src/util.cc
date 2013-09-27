@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "timegm.h"
+
 namespace spdylay {
 
 namespace util {
@@ -177,15 +179,6 @@ char upcase(char c)
 {
   if('a' <= c && c <= 'z') {
     return c-'a'+'A';
-  } else {
-    return c;
-  }
-}
-
-char lowcase(char c)
-{
-  if('A' <= c && c <= 'Z') {
-    return c-'A'+'a';
   } else {
     return c;
   }

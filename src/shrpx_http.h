@@ -27,22 +27,33 @@
 
 #include <string>
 
+#include "http-parser/http_parser.h"
+
 namespace shrpx {
 
 namespace http {
 
-const char* get_status_string(int status_code);
+std::string get_status_string(unsigned int status_code);
 
-std::string create_error_html(int status_code);
+std::string create_error_html(unsigned int status_code);
 
 std::string create_via_header_value(int major, int minor);
 
-std::string modify_location_header_value(const std::string& uri);
-
 void capitalize(std::string& s, size_t offset);
+
+// Returns false if |value| contains \r or \n.
+bool check_header_value(const char *value);
+
+void sanitize_header_value(std::string& s, size_t offset);
 
 // Adds ANSI color codes to HTTP headers |hdrs|.
 std::string colorizeHeaders(const char *hdrs);
+
+// Copies the |field| component value from |u| and |url| to the
+// |dest|. If |u| does not have |field|, then this function does
+// nothing.
+void copy_url_component(std::string& dest, http_parser_url *u, int field,
+                        const char* url);
 
 } // namespace http
 

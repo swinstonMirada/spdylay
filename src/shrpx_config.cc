@@ -36,7 +36,11 @@
 #include <limits>
 #include <fstream>
 
+#include <spdylay/spdylay.h>
+
 #include "shrpx_log.h"
+#include "shrpx_ssl.h"
+#include "shrpx_http.h"
 #include "util.h"
 
 using namespace spdylay;
@@ -46,6 +50,8 @@ namespace shrpx {
 const char SHRPX_OPT_PRIVATE_KEY_FILE[] = "private-key-file";
 const char SHRPX_OPT_PRIVATE_KEY_PASSWD_FILE[] = "private-key-passwd-file";
 const char SHRPX_OPT_CERTIFICATE_FILE[] = "certificate-file";
+const char SHRPX_OPT_DH_PARAM_FILE[] = "dh-param-file";
+const char SHRPX_OPT_SUBCERT[] = "subcert";
 
 const char SHRPX_OPT_BACKEND[] = "backend";
 const char SHRPX_OPT_FRONTEND[] = "frontend";
@@ -55,8 +61,10 @@ SHRPX_OPT_SPDY_MAX_CONCURRENT_STREAMS[] = "spdy-max-concurrent-streams";
 const char SHRPX_OPT_LOG_LEVEL[] = "log-level";
 const char SHRPX_OPT_DAEMON[] = "daemon";
 const char SHRPX_OPT_SPDY_PROXY[] = "spdy-proxy";
+const char SHRPX_OPT_SPDY_BRIDGE[] = "spdy-bridge";
 const char SHRPX_OPT_CLIENT_PROXY[] = "client-proxy";
 const char SHRPX_OPT_ADD_X_FORWARDED_FOR[] = "add-x-forwarded-for";
+const char SHRPX_OPT_NO_VIA[] = "no-via";
 const char
 SHRPX_OPT_FRONTEND_SPDY_READ_TIMEOUT[] = "frontend-spdy-read-timeout";
 const char SHRPX_OPT_FRONTEND_READ_TIMEOUT[] = "frontend-read-timeout";
@@ -68,17 +76,28 @@ const char
 SHRPX_OPT_BACKEND_KEEP_ALIVE_TIMEOUT[] = "backend-keep-alive-timeout";
 const char SHRPX_OPT_FRONTEND_SPDY_WINDOW_BITS[] = "frontend-spdy-window-bits";
 const char SHRPX_OPT_BACKEND_SPDY_WINDOW_BITS[] = "backend-spdy-window-bits";
+const char SHRPX_OPT_FRONTEND_SPDY_NO_TLS[] = "frontend-spdy-no-tls";
+const char SHRPX_OPT_FRONTEND_SPDY_PROTO[] = "frontend-spdy-proto";
+const char SHRPX_OPT_BACKEND_SPDY_NO_TLS[] = "backend-spdy-no-tls";
+const char SHRPX_OPT_BACKEND_SPDY_PROTO[] = "backend-spdy-proto";
+const char SHRPX_OPT_BACKEND_TLS_SNI_FIELD[] = "backend-tls-sni-field";
 const char SHRPX_OPT_PID_FILE[] = "pid-file";
 const char SHRPX_OPT_USER[] = "user";
 const char SHRPX_OPT_SYSLOG[] = "syslog";
 const char SHRPX_OPT_SYSLOG_FACILITY[] = "syslog-facility";
 const char SHRPX_OPT_BACKLOG[] = "backlog";
 const char SHRPX_OPT_CIPHERS[] = "ciphers";
+const char SHRPX_OPT_HONOR_CIPHER_ORDER[] = "honor-cipher-order";
 const char SHRPX_OPT_CLIENT[] = "client";
 const char SHRPX_OPT_INSECURE[] = "insecure";
 const char SHRPX_OPT_CACERT[] = "cacert";
 const char SHRPX_OPT_BACKEND_IPV4[] = "backend-ipv4";
 const char SHRPX_OPT_BACKEND_IPV6[] = "backend-ipv6";
+const char SHRPX_OPT_BACKEND_HTTP_PROXY_URI[] = "backend-http-proxy-uri";
+const char SHRPX_OPT_READ_RATE[] = "read-rate";
+const char SHRPX_OPT_READ_BURST[] = "read-burst";
+const char SHRPX_OPT_WRITE_RATE[] = "write-rate";
+const char SHRPX_OPT_WRITE_BURST[] = "write-burst";
 
 namespace {
 Config *config = 0;
@@ -174,6 +193,23 @@ void set_config_str(char **destp, const char *val)
   *destp = strdup(val);
 }
 
+namespace {
+// Parses |optarg| as SPDY NPN protocol string and returns SPDY
+// protocol version number. This function returns -1 on error.
+int parse_spdy_proto(const char *optarg)
+{
+  size_t len = strlen(optarg);
+  const unsigned char *proto;
+  proto = reinterpret_cast<const unsigned char*>(optarg);
+  uint16_t version = spdylay_npn_get_version(proto, len);
+  if(!version) {
+    LOG(ERROR) << "Unsupported SPDY version: " << optarg;
+    return -1;
+  }
+  return version;
+}
+} // namespace
+
 int parse_config(const char *opt, const char *optarg)
 {
   char host[NI_MAXHOST];
@@ -205,10 +241,14 @@ int parse_config(const char *opt, const char *optarg)
     mod_config()->daemon = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_SPDY_PROXY)) {
     mod_config()->spdy_proxy = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_SPDY_BRIDGE)) {
+    mod_config()->spdy_bridge = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_CLIENT_PROXY)) {
     mod_config()->client_proxy = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_ADD_X_FORWARDED_FOR)) {
     mod_config()->add_x_forwarded_for = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_NO_VIA)) {
+    mod_config()->no_via = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_READ_TIMEOUT)) {
     timeval tv = {strtol(optarg, 0, 10), 0};
     mod_config()->spdy_upstream_read_timeout = tv;
@@ -249,6 +289,26 @@ int parse_config(const char *opt, const char *optarg)
                  << " specify the integer in the range [0, 30], inclusive";
       return -1;
     }
+  } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_NO_TLS)) {
+    mod_config()->spdy_upstream_no_tls = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_PROTO)) {
+    int version = parse_spdy_proto(optarg);
+    if(version == -1) {
+      return -1;
+    } else {
+      mod_config()->spdy_upstream_version = version;
+    }
+  } else if(util::strieq(opt, SHRPX_OPT_BACKEND_SPDY_NO_TLS)) {
+    mod_config()->spdy_downstream_no_tls = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_BACKEND_SPDY_PROTO)) {
+    int version = parse_spdy_proto(optarg);
+    if(version == -1) {
+      return -1;
+    } else {
+      mod_config()->spdy_downstream_version = version;
+    }
+  } else if(util::strieq(opt, SHRPX_OPT_BACKEND_TLS_SNI_FIELD)) {
+    set_config_str(&mod_config()->backend_tls_sni_name, optarg);
   } else if(util::strieq(opt, SHRPX_OPT_PID_FILE)) {
     set_config_str(&mod_config()->pid_file, optarg);
   } else if(util::strieq(opt, SHRPX_OPT_USER)) {
@@ -271,6 +331,23 @@ int parse_config(const char *opt, const char *optarg)
     set_config_str(&mod_config()->private_key_passwd, passwd.c_str());
   } else if(util::strieq(opt, SHRPX_OPT_CERTIFICATE_FILE)) {
     set_config_str(&mod_config()->cert_file, optarg);
+  } else if(util::strieq(opt, SHRPX_OPT_DH_PARAM_FILE)) {
+    set_config_str(&mod_config()->dh_param_file, optarg);
+  } else if(util::strieq(opt, SHRPX_OPT_SUBCERT)) {
+    // Private Key file and certificate file separated by ':'.
+    const char *sp = strchr(optarg, ':');
+    if(sp) {
+      std::string keyfile(optarg, sp);
+      // TODO Do we need private key for subcert?
+      SSL_CTX *ssl_ctx = ssl::create_ssl_context(keyfile.c_str(), sp+1);
+      if(!get_config()->cert_tree) {
+        mod_config()->cert_tree = ssl::cert_lookup_tree_new();
+      }
+      if(ssl::cert_lookup_tree_add_cert_from_file(get_config()->cert_tree,
+                                                  ssl_ctx, sp+1) == -1) {
+        return -1;
+      }
+    }
   } else if(util::strieq(opt, SHRPX_OPT_SYSLOG)) {
     mod_config()->syslog = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_SYSLOG_FACILITY)) {
@@ -284,6 +361,8 @@ int parse_config(const char *opt, const char *optarg)
     mod_config()->backlog = strtol(optarg, 0, 10);
   } else if(util::strieq(opt, SHRPX_OPT_CIPHERS)) {
     set_config_str(&mod_config()->ciphers, optarg);
+  } else if(util::strieq(opt, SHRPX_OPT_HONOR_CIPHER_ORDER)) {
+    mod_config()->honor_cipher_order = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_CLIENT)) {
     mod_config()->client = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_INSECURE)) {
@@ -294,6 +373,48 @@ int parse_config(const char *opt, const char *optarg)
     mod_config()->backend_ipv4 = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_BACKEND_IPV6)) {
     mod_config()->backend_ipv6 = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_BACKEND_HTTP_PROXY_URI)) {
+    // parse URI and get hostname, port and optionally userinfo.
+    http_parser_url u;
+    memset(&u, 0, sizeof(u));
+    int rv = http_parser_parse_url(optarg, strlen(optarg), 0, &u);
+    if(rv == 0) {
+      std::string val;
+      if(u.field_set & UF_USERINFO) {
+        http::copy_url_component(val, &u, UF_USERINFO, optarg);
+        // Surprisingly, u.field_set & UF_USERINFO is nonzero even if
+        // userinfo component is empty string.
+        if(!val.empty()) {
+          val = util::percentDecode(val.begin(), val.end());
+          set_config_str(&mod_config()->downstream_http_proxy_userinfo,
+                         val.c_str());
+        }
+      }
+      if(u.field_set & UF_HOST) {
+        http::copy_url_component(val, &u, UF_HOST, optarg);
+        set_config_str(&mod_config()->downstream_http_proxy_host, val.c_str());
+      } else {
+        LOG(ERROR) << "backend-http-proxy-uri does not contain hostname";
+        return -1;
+      }
+      if(u.field_set & UF_PORT) {
+        mod_config()->downstream_http_proxy_port = u.port;
+      } else {
+        LOG(ERROR) << "backend-http-proxy-uri does not contain port";
+        return -1;
+      }
+    } else {
+      LOG(ERROR) << "Could not parse backend-http-proxy-uri";
+        return -1;
+    }
+  } else if(util::strieq(opt, SHRPX_OPT_READ_RATE)) {
+    mod_config()->read_rate = strtoul(optarg, 0, 10);
+  } else if(util::strieq(opt, SHRPX_OPT_READ_BURST)) {
+    mod_config()->read_burst = strtoul(optarg, 0, 10);
+  } else if(util::strieq(opt, SHRPX_OPT_WRITE_RATE)) {
+    mod_config()->write_rate = strtoul(optarg, 0, 10);
+  } else if(util::strieq(opt, SHRPX_OPT_WRITE_BURST)) {
+    mod_config()->write_burst = strtoul(optarg, 0, 10);
   } else if(util::strieq(opt, "conf")) {
     LOG(WARNING) << "conf is ignored";
   } else {

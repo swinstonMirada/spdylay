@@ -63,7 +63,7 @@ Downstream::Downstream(Upstream *upstream, int stream_id, int priority)
 
 Downstream::~Downstream()
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DLOG(INFO, this) << "Deleting";
   }
   if(response_body_buf_) {
@@ -73,7 +73,7 @@ Downstream::~Downstream()
   if(dconn_) {
     delete dconn_;
   }
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DLOG(INFO, this) << "Deleted";
   }
 }
@@ -95,12 +95,12 @@ void Downstream::pause_read(IOCtrlReason reason)
   }
 }
 
-bool Downstream::resume_read(IOCtrlReason reason)
+int Downstream::resume_read(IOCtrlReason reason)
 {
   if(dconn_) {
     return dconn_->resume_read(reason);
   } else {
-    return false;
+    return 0;
   }
 }
 
@@ -300,8 +300,8 @@ int Downstream::push_upload_data_chunk(const uint8_t *data, size_t datalen)
   // Assumes that request headers have already been pushed to output
   // buffer using push_request_headers().
   if(!dconn_) {
-    DLOG(WARNING, this) << "dconn_ is NULL";
-    return 0;
+    DLOG(INFO, this) << "dconn_ is NULL";
+    return -1;
   }
   return dconn_->push_upload_data_chunk(data, datalen);
 }
@@ -429,7 +429,9 @@ void body_buf_cb(evbuffer *body, size_t oldlen, size_t newlen, void *arg)
 {
   Downstream *downstream = reinterpret_cast<Downstream*>(arg);
   if(newlen == 0) {
-    downstream->resume_read(SHRPX_NO_BUFFER);
+    if(downstream->resume_read(SHRPX_NO_BUFFER) == -1) {
+      DLOG(WARNING, downstream) << "Sending WINDOW_UPDATE failed";
+    }
   }
 }
 } // namespace
@@ -487,13 +489,14 @@ int32_t Downstream::get_downstream_stream_id() const
   return downstream_stream_id_;
 }
 
-int Downstream::on_upstream_write()
+uint32_t Downstream::get_response_rst_stream_status_code() const
 {
-  if(dconn_) {
-    return dconn_->on_upstream_write();
-  } else {
-    return 0;
-  }
+  return response_rst_stream_status_code_;
+}
+
+void Downstream::set_response_rst_stream_status_code(uint32_t status_code)
+{
+  response_rst_stream_status_code_ = status_code;
 }
 
 } // namespace shrpx

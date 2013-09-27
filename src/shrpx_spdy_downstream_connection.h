@@ -50,14 +50,14 @@ public:
   virtual int end_upload_data();
 
   virtual void pause_read(IOCtrlReason reason) {}
-  virtual bool resume_read(IOCtrlReason reason) { return true; }
+  virtual int resume_read(IOCtrlReason reason);
   virtual void force_resume_read() {}
 
   virtual bool get_output_buffer_full();
 
   virtual int on_read();
   virtual int on_write();
-  virtual int on_upstream_write();
+
   int send();
 
   int init_request_body_buf();
@@ -65,6 +65,8 @@ public:
 
   void attach_stream_data(StreamData *sd);
   StreamData* detach_stream_data();
+
+  int submit_rst_stream(Downstream *downstream);
 
   int32_t get_recv_window_size() const;
   void inc_recv_window_size(int32_t amount);

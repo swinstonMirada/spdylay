@@ -44,11 +44,6 @@ size_t spdylay_frame_get_len_size(uint16_t version)
   }
 }
 
-static uint8_t spdylay_unpack_pri(const uint8_t *data)
-{
-  return (data[0] >> 6) & 0x3;
-}
-
 static uint8_t* spdylay_pack_str(uint8_t *buf, const char *str, size_t len,
                                  size_t len_size)
 {
@@ -151,12 +146,7 @@ int spdylay_frame_count_unpack_nv_space(size_t *nvlen_ptr, size_t *buflen_ptr,
         spdylay_buffer_reader_advance(&reader, len);
       }
     }
-    for(j = off, off -= len; off != j; ++off) {
-      uint8_t b = spdylay_buffer_reader_uint8(&reader);
-      if(b == '\0') {
-        ++nvlen;
-      }
-    }
+    nvlen += spdylay_buffer_reader_count(&reader, len, '\0');
     ++nvlen;
   }
   if(inlen == off) {
@@ -195,6 +185,7 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
     uint32_t len;
     char *name, *val;
     char *stop;
+    int multival;
     len = spdylay_frame_get_nv_len(&reader, len_size);
     if(len == 0) {
       invalid_header_block = 1;
@@ -214,6 +205,7 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
     val = data;
     spdylay_buffer_reader_data(&reader, (uint8_t*)data, len);
 
+    multival = 0;
     for(stop = data+len; data != stop; ++data) {
       if(*data == '\0') {
         *idx++ = name;
@@ -222,9 +214,15 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
           invalid_header_block = 1;
         }
         val = data+1;
+        multival = 1;
       }
     }
     *data = '\0';
+    /* Check last header value is empty if NULL separator was
+       found. */
+    if(multival && val == data) {
+      invalid_header_block = 1;
+    }
     ++data;
 
     *idx++ = name;
@@ -252,17 +250,28 @@ size_t spdylay_frame_count_nv_space(char **nv, size_t len_size)
   int i;
   const char *prev = "";
   size_t prevlen = 0;
+  size_t prevvallen = 0;
   for(i = 0; nv[i]; i += 2) {
     const char *key = nv[i];
     const char *val = nv[i+1];
     size_t keylen = strlen(key);
     size_t vallen = strlen(val);
     if(prevlen == keylen && memcmp(prev, key, keylen) == 0) {
-      /* Join previous value, with NULL character */
-      sum += vallen+1;
+      if(vallen) {
+        if(prevvallen) {
+          /* Join previous value, with NULL character */
+          sum += vallen+1;
+          prevvallen = vallen;
+        } else {
+          /* Previous value is empty. In this case, drop the
+             previous. */
+          sum += vallen;
+        }
+      }
     } else {
       prev = key;
       prevlen = keylen;
+      prevvallen = vallen;
       /* SPDY NV header does not include terminating NULL byte */
       sum += keylen+vallen+len_size*2;
     }
@@ -275,28 +284,43 @@ ssize_t spdylay_frame_pack_nv(uint8_t *buf, char **nv, size_t len_size)
   int i;
   uint8_t *bufp = buf+len_size;
   uint32_t num_nv = 0;
-  /* TODO Join values with same keys, using '\0' as a delimiter */
   const char *prev = "";
-  uint8_t *prev_vallen_buf = NULL;
-  uint32_t prev_vallen = 0;
+  uint8_t *cur_vallen_buf = NULL;
+  uint32_t cur_vallen = 0;
+  size_t prevkeylen = 0;
+  size_t prevvallen = 0;
   for(i = 0; nv[i]; i += 2) {
     const char *key = nv[i];
     const char *val = nv[i+1];
     size_t keylen = strlen(key);
     size_t vallen = strlen(val);
-    if(strcmp(prev, key) == 0) {
-      prev_vallen += vallen+1;
-      spdylay_frame_put_nv_len(prev_vallen_buf, prev_vallen, len_size);
-      *bufp = '\0';
-      ++bufp;
-      memcpy(bufp, val, vallen);
-      bufp += vallen;
+    if(prevkeylen == keylen && memcmp(prev, key, keylen) == 0) {
+      if(vallen) {
+        if(prevvallen) {
+          /* Join previous value, with NULL character */
+          cur_vallen += vallen+1;
+          spdylay_frame_put_nv_len(cur_vallen_buf, cur_vallen, len_size);
+          *bufp = '\0';
+          ++bufp;
+          memcpy(bufp, val, vallen);
+          bufp += vallen;
+        } else {
+          /* Previous value is empty. In this case, drop the
+             previous. */
+          cur_vallen += vallen;
+          spdylay_frame_put_nv_len(cur_vallen_buf, cur_vallen, len_size);
+          memcpy(bufp, val, vallen);
+          bufp += vallen;
+        }
+      }
     } else {
       ++num_nv;
       bufp = spdylay_pack_str(bufp, key, keylen, len_size);
       prev = key;
-      prev_vallen_buf = bufp;
-      prev_vallen = vallen;
+      cur_vallen_buf = bufp;
+      cur_vallen = vallen;
+      prevkeylen = keylen;
+      prevvallen = vallen;
       bufp = spdylay_pack_str(bufp, val, vallen, len_size);
     }
   }
@@ -669,9 +693,11 @@ ssize_t spdylay_frame_pack_syn_stream(uint8_t **buf_ptr,
   spdylay_frame_pack_ctrl_hd(*buf_ptr, &frame->hd);
   spdylay_put_uint32be(&(*buf_ptr)[8], frame->stream_id);
   spdylay_put_uint32be(&(*buf_ptr)[12], frame->assoc_stream_id);
-  (*buf_ptr)[16] = (frame->pri << 6);
   if(frame->hd.version == SPDYLAY_PROTO_SPDY3) {
+    (*buf_ptr)[16] = (frame->pri << 5);
     (*buf_ptr)[17] = frame->slot;
+  } else {
+    (*buf_ptr)[16] = (frame->pri << 6);
   }
   return framelen;
 }
@@ -708,10 +734,11 @@ int spdylay_frame_unpack_syn_stream_without_nv(spdylay_syn_stream *frame,
   frame->stream_id = spdylay_get_uint32(payload) & SPDYLAY_STREAM_ID_MASK;
   frame->assoc_stream_id =
     spdylay_get_uint32(payload+4) & SPDYLAY_STREAM_ID_MASK;
-  frame->pri = spdylay_unpack_pri(payload+8);
   if(frame->hd.version == SPDYLAY_PROTO_SPDY3) {
+    frame->pri = (*(payload+8) >> 5);
     frame->slot = payload[9];
   } else {
+    frame->pri = (*(payload+8) >> 6);
     frame->slot = 0;
   }
   frame->nv = NULL;
@@ -870,7 +897,7 @@ ssize_t spdylay_frame_pack_headers(uint8_t **buf_ptr, size_t *buflen_ptr,
 {
   ssize_t framelen;
   size_t len_size;
-  size_t nv_offset;
+  ssize_t nv_offset;
   len_size = spdylay_frame_get_len_size(frame->hd.version);
   if(len_size == 0) {
     return SPDYLAY_ERR_UNSUPPORTED_VERSION;
@@ -1275,10 +1302,16 @@ ssize_t spdylay_frame_nv_offset(spdylay_frame_type type, uint16_t version)
 
 int spdylay_frame_nv_check_null(const char **nv)
 {
-  size_t i;
+  size_t i, j;
   for(i = 0; nv[i]; i += 2) {
     if(nv[i][0] == '\0' || nv[i+1] == NULL) {
       return 0;
+    }
+    for(j = 0; nv[i][j]; ++j) {
+      unsigned char c = nv[i][j];
+      if(c < 0x20 || c > 0x7e) {
+        return 0;
+      }
     }
   }
   return 1;

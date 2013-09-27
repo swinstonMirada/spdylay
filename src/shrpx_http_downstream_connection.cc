@@ -66,7 +66,7 @@ HttpDownstreamConnection::~HttpDownstreamConnection()
 
 int HttpDownstreamConnection::attach_downstream(Downstream *downstream)
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DCLOG(INFO, this) << "Attaching to DOWNSTREAM:" << downstream;
   }
   Upstream *upstream = downstream->get_upstream();
@@ -85,7 +85,7 @@ int HttpDownstreamConnection::attach_downstream(Downstream *downstream)
       bev_ = 0;
       return SHRPX_ERR_NETWORK;
     }
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, this) << "Connecting to downstream server";
     }
   }
@@ -116,20 +116,23 @@ int HttpDownstreamConnection::push_request_headers()
   std::string hdrs = downstream_->get_request_method();
   hdrs += " ";
   hdrs += downstream_->get_request_path();
-  hdrs += " ";
-  hdrs += "HTTP/1.1\r\n";
+  hdrs += " HTTP/1.1\r\n";
+  bool connection_upgrade = false;
   std::string via_value;
   std::string xff_value;
   const Headers& request_headers = downstream_->get_request_headers();
   for(Headers::const_iterator i = request_headers.begin();
       i != request_headers.end(); ++i) {
-    if(util::strieq((*i).first.c_str(), "X-Forwarded-Proto") ||
+    if(util::strieq((*i).first.c_str(), "connection")) {
+      if(util::strifind((*i).second.c_str(), "upgrade")) {
+        connection_upgrade = true;
+      }
+    } else if(util::strieq((*i).first.c_str(), "x-forwarded-proto") ||
        util::strieq((*i).first.c_str(), "keep-alive") ||
-       util::strieq((*i).first.c_str(), "connection") ||
        util::strieq((*i).first.c_str(), "proxy-connection")) {
       continue;
     }
-    if(util::strieq((*i).first.c_str(), "via")) {
+    if(!get_config()->no_via && util::strieq((*i).first.c_str(), "via")) {
       via_value = (*i).second;
       continue;
     }
@@ -142,17 +145,22 @@ int HttpDownstreamConnection::push_request_headers()
       continue;
     }
     hdrs += (*i).first;
+    http::capitalize(hdrs, hdrs.size()-(*i).first.size());
     hdrs += ": ";
     hdrs += (*i).second;
+    http::sanitize_header_value(hdrs, hdrs.size()-(*i).second.size());
     hdrs += "\r\n";
   }
   if(downstream_->get_request_connection_close()) {
     hdrs += "Connection: close\r\n";
+  } else if(connection_upgrade) {
+    hdrs += "Connection: upgrade\r\n";
   }
   if(get_config()->add_x_forwarded_for) {
     hdrs += "X-Forwarded-For: ";
     if(!xff_value.empty()) {
       hdrs += xff_value;
+      http::sanitize_header_value(hdrs, hdrs.size()-xff_value.size());
       hdrs += ", ";
     }
     hdrs += downstream_->get_upstream()->get_client_handler()->get_ipaddr();
@@ -160,28 +168,31 @@ int HttpDownstreamConnection::push_request_headers()
   } else if(!xff_value.empty()) {
     hdrs += "X-Forwarded-For: ";
     hdrs += xff_value;
+    http::sanitize_header_value(hdrs, hdrs.size()-xff_value.size());
     hdrs += "\r\n";
   }
   if(downstream_->get_request_method() != "CONNECT") {
     hdrs += "X-Forwarded-Proto: ";
     if(util::istartsWith(downstream_->get_request_path(), "http:")) {
-      hdrs += "http";
+      hdrs += "http\r\n";
     } else {
-      hdrs += "https";
+      hdrs += "https\r\n";
     }
+  }
+  if(!get_config()->no_via) {
+    hdrs += "Via: ";
+    if(!via_value.empty()) {
+      hdrs += via_value;
+      http::sanitize_header_value(hdrs, hdrs.size()-via_value.size());
+      hdrs += ", ";
+    }
+    hdrs += http::create_via_header_value(downstream_->get_request_major(),
+                                          downstream_->get_request_minor());
     hdrs += "\r\n";
   }
-  hdrs += "Via: ";
-  hdrs += via_value;
-  if(!via_value.empty()) {
-    hdrs += ", ";
-  }
-  hdrs += http::create_via_header_value(downstream_->get_request_major(),
-                                        downstream_->get_request_minor());
-  hdrs += "\r\n";
 
   hdrs += "\r\n";
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     const char *hdrp;
     std::string nhdrs;
     if(get_config()->tty) {
@@ -269,21 +280,21 @@ void idle_eventcb(bufferevent *bev, short events, void *arg)
   if(events & BEV_EVENT_CONNECTED) {
     // Downstream was detached before connection established?
     // This may be safe to be left.
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, dconn) << "Idle connection connected?";
     }
     return;
   }
   if(events & BEV_EVENT_EOF) {
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, dconn) << "Idle connection EOF";
     }
   } else if(events & BEV_EVENT_TIMEOUT) {
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, dconn) << "Idle connection timeout";
     }
   } else if(events & BEV_EVENT_ERROR) {
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, dconn) << "Idle connection network error";
     }
   }
@@ -295,7 +306,7 @@ void idle_eventcb(bufferevent *bev, short events, void *arg)
 
 void HttpDownstreamConnection::detach_downstream(Downstream *downstream)
 {
-  if(ENABLE_LOG) {
+  if(LOG_ENABLED(INFO)) {
     DCLOG(INFO, this) << "Detaching from DOWNSTREAM:" << downstream;
   }
   downstream->set_downstream_connection(0);
@@ -321,9 +332,9 @@ void HttpDownstreamConnection::pause_read(IOCtrlReason reason)
   ioctrl_.pause_read(reason);
 }
 
-bool HttpDownstreamConnection::resume_read(IOCtrlReason reason)
+int HttpDownstreamConnection::resume_read(IOCtrlReason reason)
 {
-  return ioctrl_.resume_read(reason);
+  return ioctrl_.resume_read(reason) ? 0 : -1;
 }
 
 void HttpDownstreamConnection::force_resume_read()
@@ -347,6 +358,9 @@ int htp_hdrs_completecb(http_parser *htp)
   downstream->set_response_minor(htp->http_minor);
   downstream->set_response_connection_close(!http_should_keep_alive(htp));
   downstream->set_response_state(Downstream::HEADER_COMPLETE);
+  if(downstream->tunnel_established()) {
+    downstream->set_response_connection_close(true);
+  }
   if(downstream->get_upstream()->on_downstream_header_complete(downstream)
      != 0) {
     return -1;
@@ -417,6 +431,7 @@ namespace {
 http_parser_settings htp_hooks = {
   0, /*http_cb      on_message_begin;*/
   0, /*http_data_cb on_url;*/
+  0, /*http_cb on_status_complete */
   htp_hdr_keycb, /*http_data_cb on_header_field;*/
   htp_hdr_valcb, /*http_data_cb on_header_value;*/
   htp_hdrs_completecb, /*http_cb      on_headers_complete;*/
@@ -439,7 +454,7 @@ int HttpDownstreamConnection::on_read()
   if(htperr == HPE_OK) {
     return 0;
   } else {
-    if(ENABLE_LOG) {
+    if(LOG_ENABLED(INFO)) {
       DCLOG(INFO, this) << "HTTP parser failure: "
                         << "(" << http_errno_name(htperr) << ") "
                         << http_errno_description(htperr);
@@ -449,11 +464,6 @@ int HttpDownstreamConnection::on_read()
 }
 
 int HttpDownstreamConnection::on_write()
-{
-  return 0;
-}
-
-int HttpDownstreamConnection::on_upstream_write()
 {
   return 0;
 }

@@ -24,11 +24,29 @@
  */
 #include "spdylay_frame_test.h"
 
+#include <assert.h>
+
 #include <CUnit/CUnit.h>
 
 #include "spdylay_frame.h"
 #include "spdylay_helper.h"
 #include "spdylay_test_helper.h"
+
+/* Reads |len_size| byte from |data| as |len_size| byte network byte
+   order integer, and returns it in host byte order. Currently, we
+   only support len_size == 2 or 4 */
+static int get_packed_hd_len(uint8_t *data, size_t len_size)
+{
+  if(len_size == 2) {
+    return spdylay_get_uint16(data);
+  } else if(len_size == 4) {
+    return spdylay_get_uint32(data);
+  } else {
+    /* Not supported */
+    assert(0);
+    return 0;
+  }
+}
 
 static const char *headers[] = {
   "method", "GET",
@@ -181,12 +199,99 @@ void test_spdylay_frame_pack_nv_duplicate_keys(void)
   spdylay_frame_nv_del(nv);
 }
 
+static const char *multi_empty_headers1[] = {
+  "a", "",
+  "a", "",
+  NULL
+};
+
+static const char *multi_empty_headers2[] = {
+  "a", "/",
+  "a", "",
+  NULL
+};
+
+static const char *multi_empty_headers3[] = {
+  "a", "",
+  "a", "/",
+  NULL
+};
+
 void test_spdylay_frame_count_nv_space(void)
 {
   size_t len_size = 2;
   CU_ASSERT(85 == spdylay_frame_count_nv_space((char**)headers, len_size));
   len_size = 4;
   CU_ASSERT(111 == spdylay_frame_count_nv_space((char**)headers, len_size));
+  /* only ("a", "") is counted */
+  CU_ASSERT(13 == spdylay_frame_count_nv_space((char**)multi_empty_headers1,
+                                               len_size));
+  /* only ("a", "/") is counted */
+  CU_ASSERT(14 == spdylay_frame_count_nv_space((char**)multi_empty_headers2,
+                                               len_size));
+  /* only ("a", "/") is counted */
+  CU_ASSERT(14 == spdylay_frame_count_nv_space((char**)multi_empty_headers3,
+                                               len_size));
+}
+
+static void frame_pack_nv_empty_value_check(uint8_t *outptr,
+                                            int vallen,
+                                            const char *val,
+                                            size_t len_size)
+{
+  int len;
+  len = get_packed_hd_len(outptr, len_size);
+  CU_ASSERT(1 == len);
+  outptr += len_size;
+  len = get_packed_hd_len(outptr, len_size);
+  CU_ASSERT(1 == len);
+  outptr += len_size;
+  CU_ASSERT(0 == memcmp("a", outptr, len));
+  outptr += len;
+  len = get_packed_hd_len(outptr, len_size);
+  CU_ASSERT(vallen == len);
+  len += len_size;
+  if(vallen == len) {
+    CU_ASSERT(0 == memcmp(val, outptr, vallen));
+  }
+}
+
+static void test_spdylay_frame_pack_nv_empty_value_with(size_t len_size)
+{
+  uint8_t out[256];
+  char **nv;
+  ssize_t rv;
+  int off = (len_size == 2 ? -6 : 0);
+
+  nv = spdylay_frame_nv_copy(multi_empty_headers1);
+  rv = spdylay_frame_pack_nv(out, nv, len_size);
+  CU_ASSERT(13+off == rv);
+  frame_pack_nv_empty_value_check(out, 0, NULL, len_size);
+  spdylay_frame_nv_del(nv);
+
+  nv = spdylay_frame_nv_copy(multi_empty_headers2);
+  rv = spdylay_frame_pack_nv(out, nv, len_size);
+  CU_ASSERT(14+off == rv);
+  frame_pack_nv_empty_value_check(out, 1, "/", len_size);
+  spdylay_frame_nv_del(nv);
+
+  nv = spdylay_frame_nv_copy(multi_empty_headers3);
+  rv = spdylay_frame_pack_nv(out, nv, len_size);
+  CU_ASSERT(14+off == rv);
+  frame_pack_nv_empty_value_check(out, 1, "/", len_size);
+  spdylay_frame_nv_del(nv);
+}
+
+void test_spdylay_frame_pack_nv_empty_value_spdy2(void)
+{
+  test_spdylay_frame_pack_nv_empty_value_with
+    (spdylay_frame_get_len_size(SPDYLAY_PROTO_SPDY2));
+}
+
+void test_spdylay_frame_pack_nv_empty_value_spdy3(void)
+{
+  test_spdylay_frame_pack_nv_empty_value_with
+    (spdylay_frame_get_len_size(SPDYLAY_PROTO_SPDY3));
 }
 
 void test_spdylay_frame_count_unpack_nv_space(void)
@@ -304,11 +409,16 @@ static void test_spdylay_frame_pack_syn_stream_version(uint16_t version)
   uint8_t *buf = NULL, *nvbuf = NULL;
   size_t buflen = 0, nvbuflen = 0;
   ssize_t framelen;
-
+  uint8_t pri;
+  if(version == SPDYLAY_PROTO_SPDY2) {
+    pri = 3;
+  } else {
+    pri = 7;
+  }
   spdylay_zlib_deflate_hd_init(&deflater, 1, version);
   spdylay_zlib_inflate_hd_init(&inflater, version);
   spdylay_frame_syn_stream_init(&frame.syn_stream, version,
-                                SPDYLAY_CTRL_FLAG_FIN, 65536, 1000000007, 3,
+                                SPDYLAY_CTRL_FLAG_FIN, 65536, 1000000007, pri,
                                 spdylay_frame_nv_copy(headers));
   framelen = spdylay_frame_pack_syn_stream(&buf, &buflen,
                                            &nvbuf, &nvbuflen,
@@ -324,6 +434,7 @@ static void test_spdylay_frame_pack_syn_stream_version(uint16_t version)
   CU_ASSERT(version == oframe.syn_stream.hd.version);
   CU_ASSERT(SPDYLAY_SYN_STREAM == oframe.syn_stream.hd.type);
   CU_ASSERT(SPDYLAY_CTRL_FLAG_FIN == oframe.syn_stream.hd.flags);
+  CU_ASSERT(pri == oframe.syn_stream.pri);
   CU_ASSERT(framelen-SPDYLAY_FRAME_HEAD_LENGTH == oframe.syn_stream.hd.length);
   CU_ASSERT(strcmp("method", oframe.syn_stream.nv[0]) == 0);
   CU_ASSERT(strcmp("GET", oframe.syn_stream.nv[1]) == 0);
@@ -701,6 +812,8 @@ void test_spdylay_frame_nv_3to2(void)
   spdylay_frame_nv_del(nv);
 }
 
+/* This function intentionally does not merge same header field into
+   one */
 static size_t spdylay_pack_nv(uint8_t *buf, size_t buflen, const char **nv,
                               size_t len_size)
 {
@@ -784,6 +897,51 @@ void test_spdylay_frame_unpack_nv_check_name_spdy3(void)
     (spdylay_frame_get_len_size(SPDYLAY_PROTO_SPDY3));
 }
 
+static void test_spdylay_frame_unpack_nv_last_empty_value_with(size_t len_size)
+{
+  size_t nvbuflen;
+  uint8_t nvbuf[256];
+  uint8_t *nvbufptr;
+  spdylay_buffer buffer;
+  char **outnv = 0;
+  const char hdname[] = "method";
+
+  nvbufptr = nvbuf;
+  spdylay_frame_put_nv_len(nvbufptr, 1, len_size);
+  nvbufptr += len_size;
+  spdylay_frame_put_nv_len(nvbufptr, sizeof(hdname)-1, len_size);
+  nvbufptr += len_size;
+  memcpy(nvbufptr, hdname, sizeof(hdname)-1);
+  nvbufptr += sizeof(hdname)-1;
+  spdylay_frame_put_nv_len(nvbufptr, 4, len_size);
+  nvbufptr += len_size;
+  /* Copy including terminating NULL */
+  memcpy(nvbufptr, "GET", 4);
+  nvbufptr += 4;
+  nvbuflen = nvbufptr - nvbuf;
+
+  spdylay_buffer_init(&buffer, 32);
+
+  spdylay_buffer_write(&buffer, nvbuf, nvbuflen);
+  CU_ASSERT(SPDYLAY_ERR_INVALID_HEADER_BLOCK ==
+            spdylay_frame_unpack_nv(&outnv, &buffer, len_size));
+
+  spdylay_frame_nv_del(outnv);
+  spdylay_buffer_free(&buffer);
+}
+
+void test_spdylay_frame_unpack_nv_last_empty_value_spdy2(void)
+{
+  test_spdylay_frame_unpack_nv_last_empty_value_with
+    (spdylay_frame_get_len_size(SPDYLAY_PROTO_SPDY2));
+}
+
+void test_spdylay_frame_unpack_nv_last_empty_value_spdy3(void)
+{
+  test_spdylay_frame_unpack_nv_last_empty_value_with
+    (spdylay_frame_get_len_size(SPDYLAY_PROTO_SPDY3));
+}
+
 void test_spdylay_frame_nv_set_origin(void)
 {
   spdylay_origin origin;
@@ -828,4 +986,17 @@ void test_spdylay_frame_nv_set_origin(void)
 
   CU_ASSERT(SPDYLAY_ERR_INVALID_ARGUMENT ==
             spdylay_frame_nv_set_origin((char**)nv5, &origin));
+}
+
+void test_spdylay_frame_nv_check_null(void)
+{
+  const char *headers1[] = { "path", "/", "host", "a", NULL };
+  const char *headers2[] = { "", "/", "host", "a", NULL };
+  const char *headers3[] = { "path", "/", "host\x01", "a", NULL };
+  const char *headers4[] = { "path", "/", "host", NULL, NULL };
+
+  CU_ASSERT(spdylay_frame_nv_check_null(headers1));
+  CU_ASSERT(0 == spdylay_frame_nv_check_null(headers2));
+  CU_ASSERT(0 == spdylay_frame_nv_check_null(headers3));
+  CU_ASSERT(0 == spdylay_frame_nv_check_null(headers4));
 }

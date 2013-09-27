@@ -25,6 +25,7 @@
 #include "spdylay_config.h"
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -54,10 +55,15 @@
 #include <openssl/err.h>
 #include <spdylay/spdylay.h>
 
+#include "http-parser/http_parser.h"
+
 #include "spdylay_ssl.h"
-#include "uri.h"
 #include "HtmlParser.h"
 #include "util.h"
+
+#ifndef O_BINARY
+# define O_BINARY (0)
+#endif // O_BINARY
 
 namespace spdylay {
 
@@ -68,6 +74,7 @@ struct Config {
   bool get_assets;
   bool stat;
   bool no_tls;
+  int multiply;
   int spdy_version;
   // milliseconds
   int timeout;
@@ -75,8 +82,9 @@ struct Config {
   std::string keyfile;
   int window_bits;
   std::map<std::string,std::string> headers;
+  std::string datafile;
   Config():null_out(false), remote_name(false), verbose(false),
-           get_assets(false), stat(false), no_tls(false),
+           get_assets(false), stat(false), no_tls(false), multiply(1),
            spdy_version(-1), timeout(-1), window_bits(-1)
   {}
 };
@@ -98,19 +106,122 @@ struct RequestStat {
 
 void record_time(timeval *tv)
 {
-  gettimeofday(tv, 0);
+  get_time(tv);
+}
+
+bool has_uri_field(const http_parser_url &u, http_parser_url_fields field)
+{
+  return u.field_set & (1 << field);
+}
+
+bool fieldeq(const char *uri1, const http_parser_url &u1,
+             const char *uri2, const http_parser_url &u2,
+             http_parser_url_fields field)
+{
+  if(!has_uri_field(u1, field)) {
+    if(!has_uri_field(u2, field)) {
+      return true;
+    } else {
+      return false;
+    }
+  } else if(!has_uri_field(u2, field)) {
+    return false;
+  }
+  if(u1.field_data[field].len != u2.field_data[field].len) {
+    return false;
+  }
+  return memcmp(uri1+u1.field_data[field].off,
+                uri2+u2.field_data[field].off,
+                u1.field_data[field].len) == 0;
+}
+
+bool fieldeq(const char *uri, const http_parser_url &u,
+             http_parser_url_fields field,
+             const char *t)
+{
+  if(!has_uri_field(u, field)) {
+    if(!t[0]) {
+      return true;
+    } else {
+      return false;
+    }
+  } else if(!t[0]) {
+    return false;
+  }
+  int i, len = u.field_data[field].len;
+  const char *p = uri+u.field_data[field].off;
+  for(i = 0; i < len && t[i] && p[i] == t[i]; ++i);
+  return i == len && !t[i];
+}
+
+uint16_t get_default_port(const char *uri, const http_parser_url &u)
+{
+  if(fieldeq(uri, u, UF_SCHEMA, "https")) {
+    return 443;
+  } else if(fieldeq(uri, u, UF_SCHEMA, "http")) {
+    return 80;
+  } else {
+    return 443;
+  }
+}
+
+std::string get_uri_field(const char *uri, const http_parser_url &u,
+                          http_parser_url_fields field)
+{
+  if(has_uri_field(u, field)) {
+    return std::string(uri+u.field_data[field].off,
+                       u.field_data[field].len);
+  } else {
+    return "";
+  }
+}
+
+bool porteq(const char *uri1, const http_parser_url &u1,
+            const char *uri2, const http_parser_url &u2)
+{
+  uint16_t port1, port2;
+  port1 = has_uri_field(u1, UF_PORT) ? u1.port : get_default_port(uri1, u1);
+  port2 = has_uri_field(u2, UF_PORT) ? u2.port : get_default_port(uri2, u2);
+  return port1 == port2;
+}
+
+void write_uri_field(std::ostream& o,
+                     const char *uri, const http_parser_url &u,
+                     http_parser_url_fields field)
+{
+  if(has_uri_field(u, field)) {
+    o.write(uri+u.field_data[field].off, u.field_data[field].len);
+  }
+}
+
+std::string strip_fragment(const char *raw_uri)
+{
+  const char *end;
+  for(end = raw_uri; *end && *end != '#'; ++end);
+  size_t len = end-raw_uri;
+  return std::string(raw_uri, len);
 }
 
 struct Request {
-  uri::UriStruct us;
+  // URI without fragment
+  std::string uri;
+  http_parser_url u;
   spdylay_gzip *inflater;
   HtmlParser *html_parser;
+  const spdylay_data_provider *data_prd;
+  int64_t data_length;
+  int64_t data_offset;
   // Recursion level: 0: first entity, 1: entity linked from first entity
   int level;
   RequestStat stat;
   std::string status;
-  Request(const uri::UriStruct& us, int level = 0)
-    : us(us), inflater(0), html_parser(0), level(level)
+  Request(const std::string& uri, const http_parser_url &u,
+          const spdylay_data_provider *data_prd, int64_t data_length,
+          int level = 0)
+    : uri(uri), u(u),
+      inflater(0), html_parser(0), data_prd(data_prd),
+      data_length(data_length),data_offset(0),
+      level(level)
   {}
 
   ~Request()
@@ -128,7 +239,7 @@ struct Request {
 
   void init_html_parser()
   {
-    html_parser = new HtmlParser(uri::construct(us));
+    html_parser = new HtmlParser(uri);
   }
 
   int update_html_parser(const uint8_t *data, size_t len, int fin)
@@ -140,6 +251,28 @@ struct Request {
     rv = html_parser->parse_chunk(reinterpret_cast<const char*>(data), len,
                                   fin);
     return rv;
+  }
+
+  std::string make_reqpath() const
+  {
+    std::string path = has_uri_field(u, UF_PATH) ?
+      get_uri_field(uri.c_str(), u, UF_PATH) : "/";
+    if(has_uri_field(u, UF_QUERY)) {
+      path += "?";
+      path.append(uri.c_str()+u.field_data[UF_QUERY].off,
+                  u.field_data[UF_QUERY].len);
+    }
+    return path;
+  }
+
+  bool is_ipv6_literal_addr() const
+  {
+    if(has_uri_field(u, UF_HOST)) {
+      return memchr(uri.c_str()+u.field_data[UF_HOST].off, ':',
+                    u.field_data[UF_HOST].len);
+    } else {
+      return false;
+    }
   }
 
   void record_syn_stream_time()
@@ -167,6 +300,8 @@ struct SessionStat {
   }
 };
 
+Config config;
+
 struct SpdySession {
   std::vector<Request*> reqvec;
   // Map from stream ID to Request object.
@@ -179,7 +314,7 @@ struct SpdySession {
   std::string hostport;
   Spdylay *sc;
   SessionStat stat;
-  SpdySession():complete(0) {}
+  SpdySession():complete(0), sc(0) {}
   ~SpdySession()
   {
     for(size_t i = 0; i < reqvec.size(); ++i) {
@@ -196,24 +331,32 @@ struct SpdySession {
       return;
     }
     std::stringstream ss;
-    if(reqvec[0]->us.ipv6LiteralAddress) {
-      ss << "[" << reqvec[0]->us.host << "]";
+    if(reqvec[0]->is_ipv6_literal_addr()) {
+      ss << "[";
+      write_uri_field(ss, reqvec[0]->uri.c_str(), reqvec[0]->u, UF_HOST);
+      ss << "]";
     } else {
-      ss << reqvec[0]->us.host;
+      write_uri_field(ss, reqvec[0]->uri.c_str(), reqvec[0]->u, UF_HOST);
     }
-    if(reqvec[0]->us.port != 443) {
-      ss << ":" << reqvec[0]->us.port;
+    if(has_uri_field(reqvec[0]->u, UF_PORT) &&
+       reqvec[0]->u.port != get_default_port(reqvec[0]->uri.c_str(),
+                                             reqvec[0]->u)) {
+      ss << ":" << reqvec[0]->u.port;
     }
     hostport = ss.str();
   }
-  bool add_request(const uri::UriStruct& us, int level = 0)
+  bool add_request(const std::string& uri, const http_parser_url& u,
+                   const spdylay_data_provider *data_prd,
+                   int64_t data_length,
+                   int level = 0)
   {
-    std::string key = us.dir+us.file+us.query;
-    if(path_cache.count(key)) {
+    if(path_cache.count(uri)) {
       return false;
     } else {
-      path_cache.insert(key);
-      reqvec.push_back(new Request(us, level));
+      if(config.multiply == 1) {
+        path_cache.insert(uri);
+      }
+      reqvec.push_back(new Request(uri, u, data_prd, data_length, level));
       return true;
     }
   }
@@ -223,16 +366,16 @@ struct SpdySession {
   }
 };
 
-Config config;
 extern bool ssl_debug;
 
 void submit_request(Spdylay& sc, const std::string& hostport,
                     const std::map<std::string,std::string> &headers,
                     Request* req)
 {
-  uri::UriStruct& us = req->us;
-  std::string path = us.dir+us.file+us.query;
-  int r = sc.submit_request(us.protocol, hostport, path, headers, 3, req);
+  std::string path = req->make_reqpath();
+  int r = sc.submit_request(get_uri_field(req->uri.c_str(), req->u, UF_SCHEMA),
+                            hostport, path, headers, 3, req->data_prd,
+                            req->data_length, req);
   assert(r == 0);
 }
 
@@ -245,14 +388,18 @@ void update_html_parser(SpdySession *spdySession, Request *req,
   req->update_html_parser(data, len, fin);
 
   for(size_t i = 0; i < req->html_parser->get_links().size(); ++i) {
-    const std::string& uri = req->html_parser->get_links()[i];
-    uri::UriStruct us;
-    if(uri::parse(us, uri) &&
-       req->us.protocol == us.protocol && req->us.host == us.host &&
-       req->us.port == us.port) {
-      spdySession->add_request(us, req->level+1);
-      submit_request(*spdySession->sc, spdySession->hostport, config.headers,
-                     spdySession->reqvec.back());
+    const std::string& raw_uri = req->html_parser->get_links()[i];
+    std::string uri = strip_fragment(raw_uri.c_str());
+    http_parser_url u;
+    if(http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) == 0 &&
+       fieldeq(uri.c_str(), u, req->uri.c_str(), req->u, UF_SCHEMA) &&
+       fieldeq(uri.c_str(), u, req->uri.c_str(), req->u, UF_HOST) &&
+       porteq(uri.c_str(), u, req->uri.c_str(), req->u)) {
+      // No POST data for assets
+      if ( spdySession->add_request(uri, u, 0, 0, req->level+1) ) {
+        submit_request(*spdySession->sc, spdySession->hostport, config.headers,
+                       spdySession->reqvec.back());
+      }
     }
   }
   req->html_parser->clear_links();
@@ -280,7 +427,7 @@ void on_data_chunk_recv_callback
         size_t outlen = MAX_OUTLEN;
         size_t tlen = len;
         int rv = spdylay_gzip_inflate(req->inflater, out, &outlen, data, &tlen);
-        if(rv == -1) {
+        if(rv != 0) {
           spdylay_submit_rst_stream(session, stream_id, SPDYLAY_INTERNAL_ERROR);
           break;
         }
@@ -312,13 +459,19 @@ void check_stream_id(spdylay_session *session,
   req->record_syn_stream_time();
 }
 
-void on_ctrl_send_callback2
+void before_ctrl_send_callback
 (spdylay_session *session, spdylay_frame_type type, spdylay_frame *frame,
  void *user_data)
 {
   if(type == SPDYLAY_SYN_STREAM) {
     check_stream_id(session, type, frame, user_data);
   }
+}
+
+void on_ctrl_send_callback2
+(spdylay_session *session, spdylay_frame_type type, spdylay_frame *frame,
+ void *user_data)
+{
   if(config.verbose) {
     on_ctrl_send_callback(session, type, frame, user_data);
   }
@@ -403,7 +556,7 @@ void print_stats(const SpdySession& spdySession)
   std::cout << "***** Statistics *****" << std::endl;
   for(size_t i = 0; i < spdySession.reqvec.size(); ++i) {
     const Request *req = spdySession.reqvec[i];
-    std::cout << "#" << i+1 << ": " << uri::construct(req->us) << std::endl;
+    std::cout << "#" << i+1 << ": " << req->uri << std::endl;
     std::cout << "    Status: " << req->status << std::endl;
     std::cout << "    Delta (ms) from SSL/TLS handshake(SYN_STREAM):"
               << std::endl;
@@ -431,85 +584,10 @@ void print_stats(const SpdySession& spdySession)
   }
 }
 
-int communicate(const std::string& host, uint16_t port,
-                SpdySession& spdySession,
-                const spdylay_session_callbacks *callbacks)
+int spdy_evloop(int fd, SSL *ssl, int spdy_version, SpdySession& spdySession,
+                const spdylay_session_callbacks *callbacks, int timeout)
 {
-  int rv;
-  int timeout = config.timeout;
-  int fd = nonblock_connect_to(host, port, timeout);
-  if(fd == -1) {
-    std::cerr << "Could not connect to the host" << std::endl;
-    return -1;
-  } else if(fd == -2) {
-    std::cerr << "Request to " << spdySession.hostport << " timed out "
-              << "during establishing connection."
-              << std::endl;
-    return -1;
-  }
-  set_tcp_nodelay(fd);
-
-  std::string next_proto;
-  switch(config.spdy_version) {
-  case SPDYLAY_PROTO_SPDY2:
-    next_proto = "spdy/2";
-    break;
-  case SPDYLAY_PROTO_SPDY3:
-    next_proto = "spdy/3";
-    break;
-  }
-
-  SSL_CTX *ssl_ctx = 0;
-  SSL *ssl = 0;
-  if(!config.no_tls) {
-    ssl_ctx = SSL_CTX_new(TLSv1_client_method());
-    if(!ssl_ctx) {
-      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
-      return -1;
-    }
-    setup_ssl_ctx(ssl_ctx, &next_proto);
-    if(!config.keyfile.empty()) {
-      if(SSL_CTX_use_PrivateKey_file(ssl_ctx, config.keyfile.c_str(),
-                                     SSL_FILETYPE_PEM) != 1) {
-        std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
-        return -1;
-      }
-    }
-    if(!config.certfile.empty()) {
-      if(SSL_CTX_use_certificate_chain_file(ssl_ctx,
-                                            config.certfile.c_str()) != 1) {
-        std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
-        return -1;
-      }
-    }
-    ssl = SSL_new(ssl_ctx);
-    if(!ssl) {
-      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
-      return -1;
-    }
-    if (!SSL_set_tlsext_host_name(ssl, host.c_str())) {
-      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
-      return -1;
-    }
-    rv = ssl_nonblock_handshake(ssl, fd, timeout);
-    if(rv == -1) {
-      return -1;
-    } else if(rv == -2) {
-      std::cerr << "Request to " << spdySession.hostport
-                << " timed out in SSL/TLS handshake."
-                << std::endl;
-      return -1;
-    }
-  }
-
-  spdySession.record_handshake_time();
-  int spdy_version = spdylay_npn_get_version(
-      reinterpret_cast<const unsigned char*>(next_proto.c_str()),
-      next_proto.size());
-  if (spdy_version <= 0) {
-    return -1;
-  }
-
+  int result = 0;
   Spdylay sc(fd, ssl, spdy_version, callbacks, &spdySession);
   spdySession.sc = &sc;
 
@@ -531,63 +609,206 @@ int communicate(const std::string& host, uint16_t port,
   pollfds[0].fd = fd;
   ctl_poll(pollfds, &sc);
 
-  bool ok = true;
   timeval tv1, tv2;
   while(!sc.finish()) {
     if(config.timeout != -1) {
-      gettimeofday(&tv1, 0);
+      get_time(&tv1);
     }
     int nfds = poll(pollfds, npollfds, timeout);
     if(nfds == -1) {
       perror("poll");
-      return -1;
+      result = -1;
+      break;
     }
     if(pollfds[0].revents & (POLLIN | POLLOUT)) {
       int rv;
       if((rv = sc.recv()) != 0 || (rv = sc.send()) != 0) {
         if(rv != SPDYLAY_ERR_EOF || !spdySession.all_requests_processed()) {
-          std::cout << "Fatal: " << spdylay_strerror(rv) << std::endl;
-          std::cout << "reqnum=" << spdySession.reqvec.size()
+          std::cerr << "Fatal: " << spdylay_strerror(rv) << "\n"
+                    << "reqnum=" << spdySession.reqvec.size()
                     << ", completed=" << spdySession.complete << std::endl;
         }
-        ok = false;
+        result = -1;
         break;
       }
     }
     if((pollfds[0].revents & POLLHUP) || (pollfds[0].revents & POLLERR)) {
-      std::cout << "HUP" << std::endl;
-      ok = false;
+      std::cerr << "HUP" << std::endl;
+      result = -1;
       break;
     }
     if(config.timeout != -1) {
-      gettimeofday(&tv2, 0);
+      get_time(&tv2);
       timeout -= time_delta(tv2, tv1);
       if (timeout <= 0) {
         std::cerr << "Requests to " << spdySession.hostport << " timed out."
                   << std::endl;
-        ok = false;
+        result = -1;
         break;
       }
     }
-    assert(ok);
     ctl_poll(pollfds, &sc);
   }
   if(!spdySession.all_requests_processed()) {
-    std::cout << "Some requests were not processed. total="
+    std::cerr << "Some requests were not processed. total="
               << spdySession.reqvec.size()
               << ", processed=" << spdySession.complete << std::endl;
   }
+  if(config.stat) {
+    print_stats(spdySession);
+  }
+  return result;
+}
+
+int communicate(const std::string& host, uint16_t port,
+                SpdySession& spdySession,
+                const spdylay_session_callbacks *callbacks)
+{
+  int result = 0;
+  int rv;
+  int spdy_version;
+  std::string next_proto;
+  int timeout = config.timeout;
+  SSL_CTX *ssl_ctx = 0;
+  SSL *ssl = 0;
+  int fd = nonblock_connect_to(host, port, timeout);
+  if(fd == -1) {
+    std::cerr << "Could not connect to the host: " << spdySession.hostport
+              << std::endl;
+    result = -1;
+    goto fin;
+  } else if(fd == -2) {
+    std::cerr << "Request to " << spdySession.hostport << " timed out "
+              << "during establishing connection."
+              << std::endl;
+    result = -1;
+    goto fin;
+  }
+  if(set_tcp_nodelay(fd) == -1) {
+    std::cerr << "Setting TCP_NODELAY failed: " << strerror(errno)
+              << std::endl;
+  }
+
+  switch(config.spdy_version) {
+  case SPDYLAY_PROTO_SPDY2:
+    next_proto = "spdy/2";
+    break;
+  case SPDYLAY_PROTO_SPDY3:
+    next_proto = "spdy/3";
+    break;
+  }
+
+  if(!config.no_tls) {
+    ssl_ctx = SSL_CTX_new(TLSv1_client_method());
+    if(!ssl_ctx) {
+      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
+      result = -1;
+      goto fin;
+    }
+    setup_ssl_ctx(ssl_ctx, &next_proto);
+    if(!config.keyfile.empty()) {
+      if(SSL_CTX_use_PrivateKey_file(ssl_ctx, config.keyfile.c_str(),
+                                     SSL_FILETYPE_PEM) != 1) {
+        std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
+        result = -1;
+        goto fin;
+      }
+    }
+    if(!config.certfile.empty()) {
+      if(SSL_CTX_use_certificate_chain_file(ssl_ctx,
+                                            config.certfile.c_str()) != 1) {
+        std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
+        result = -1;
+        goto fin;
+      }
+    }
+    ssl = SSL_new(ssl_ctx);
+    if(!ssl) {
+      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
+      result = -1;
+      goto fin;
+    }
+
+    // If the user overrode the host header, use that value for the
+    // SNI extension
+    const char *host_string = 0;
+    std::map<std::string,std::string>::const_iterator i =
+      config.headers.find( "Host" );
+    if ( i != config.headers.end() ) {
+      host_string = (*i).second.c_str();
+    }
+    else {
+      host_string = host.c_str();
+    }
+
+    if (!SSL_set_tlsext_host_name(ssl, host_string)) {
+      std::cerr << ERR_error_string(ERR_get_error(), 0) << std::endl;
+      result = -1;
+      goto fin;
+    }
+    rv = ssl_nonblock_handshake(ssl, fd, timeout);
+    if(rv == -1) {
+      result = -1;
+      goto fin;
+    } else if(rv == -2) {
+      std::cerr << "Request to " << spdySession.hostport
+                << " timed out in SSL/TLS handshake."
+                << std::endl;
+      result = -1;
+      goto fin;
+    }
+  }
+
+  if ( config.verbose ) {
+    print_timer();
+    std::cout << " Handshake complete" << std::endl;
+  }
+
+  spdySession.record_handshake_time();
+  spdy_version = spdylay_npn_get_version(
+      reinterpret_cast<const unsigned char*>(next_proto.c_str()),
+      next_proto.size());
+  if (spdy_version <= 0) {
+    std::cerr << "No supported SPDY version was negotiated." << std::endl;
+    result = -1;
+    goto fin;
+  }
+
+  result = spdy_evloop(fd, ssl, spdy_version, spdySession, callbacks, timeout);
+ fin:
   if(ssl) {
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ssl_ctx);
   }
-  shutdown(fd, SHUT_WR);
-  close(fd);
-  if(config.stat) {
-    print_stats(spdySession);
+  if(fd != -1) {
+    shutdown(fd, SHUT_WR);
+    close(fd);
   }
-  return ok ? 0 : -1;
+  return result;
+}
+
+ssize_t file_read_callback
+(spdylay_session *session, int32_t stream_id,
+ uint8_t *buf, size_t length, int *eof,
+ spdylay_data_source *source, void *user_data)
+{
+  Request *req = (Request*)spdylay_session_get_stream_user_data
+    (session, stream_id);
+  int fd = source->fd;
+  ssize_t r;
+  while((r = pread(fd, buf, length, req->data_offset)) == -1 &&
+        errno == EINTR);
+  if(r == -1) {
+    return SPDYLAY_ERR_TEMPORAL_CALLBACK_FAILURE;
+  } else {
+    if(r == 0) {
+      *eof = 1;
+    } else {
+      req->data_offset += r;
+    }
+    return r;
+  }
 }
 
 int run(char **uris, int n)
@@ -599,8 +820,10 @@ int run(char **uris, int n)
   callbacks.on_stream_close_callback = on_stream_close_callback;
   callbacks.on_ctrl_recv_callback = on_ctrl_recv_callback2;
   callbacks.on_ctrl_send_callback = on_ctrl_send_callback2;
+  callbacks.before_ctrl_send_callback = before_ctrl_send_callback;
   if(config.verbose) {
     callbacks.on_data_recv_callback = on_data_recv_callback;
+    callbacks.on_data_send_callback = on_data_send_callback;
     callbacks.on_invalid_ctrl_recv_callback = on_invalid_ctrl_recv_callback;
     callbacks.on_ctrl_recv_parse_error_callback =
       on_ctrl_recv_parse_error_callback;
@@ -612,10 +835,34 @@ int run(char **uris, int n)
   uint16_t prev_port = 0;
   int failures = 0;
   SpdySession spdySession;
+  int data_fd = -1;
+  spdylay_data_provider data_prd;
+  struct stat data_stat;
+
+  if(!config.datafile.empty()) {
+    data_fd = open(config.datafile.c_str(), O_RDONLY | O_BINARY);
+    if(data_fd == -1) {
+      std::cerr << "Could not open file " << config.datafile << std::endl;
+      return 1;
+    }
+    if(fstat(data_fd, &data_stat) == -1) {
+      close(data_fd);
+      std::cerr << "Could not stat file " << config.datafile << std::endl;
+      return 1;
+    }
+    data_prd.source.fd = data_fd;
+    data_prd.read_callback = file_read_callback;
+  }
+
   for(int i = 0; i < n; ++i) {
-    uri::UriStruct us;
-    if(uri::parse(us, uris[i])) {
-      if(prev_host != us.host || prev_port != us.port) {
+    http_parser_url u;
+    std::string uri = strip_fragment(uris[i]);
+    if(http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) == 0 &&
+       has_uri_field(u, UF_SCHEMA)) {
+      uint16_t port = has_uri_field(u, UF_PORT) ?
+        u.port : get_default_port(uri.c_str(), u);
+      if(!fieldeq(uri.c_str(), u, UF_HOST, prev_host.c_str()) ||
+         u.port != prev_port) {
         if(!spdySession.reqvec.empty()) {
           spdySession.update_hostport();
           if (communicate(prev_host, prev_port, spdySession, &callbacks) != 0) {
@@ -623,10 +870,13 @@ int run(char **uris, int n)
           }
           spdySession = SpdySession();
         }
-        prev_host = us.host;
-        prev_port = us.port;
+        prev_host = get_uri_field(uri.c_str(), u, UF_HOST);
+        prev_port = port;
       }
-      spdySession.add_request(us);
+      for(int j = 0; j < config.multiply; ++j) {
+        spdySession.add_request(uri, u, data_fd == -1 ? 0 : &data_prd,
+                                data_stat.st_size);
+      }
     }
   }
   if(!spdySession.reqvec.empty()) {
@@ -641,7 +891,7 @@ int run(char **uris, int n)
 void print_usage(std::ostream& out)
 {
   out << "Usage: spdycat [-Oansv23] [-t <SECONDS>] [-w <WINDOW_BITS>] [--cert=<CERT>]\n"
-      << "               [--key=<KEY>] [--no-tls] <URI>..."
+      << "               [--key=<KEY>] [--no-tls] [-d <FILE>] [-m <N>] <URI>..."
       << std::endl;
 }
 
@@ -675,6 +925,11 @@ void print_help(std::ostream& out)
       << "                       must be in PEM format.\n"
       << "    --no-tls           Disable SSL/TLS. Use -2 or -3 to specify\n"
       << "                       SPDY protocol version to use.\n"
+      << "    -d, --data=<FILE>  Post FILE to server. If - is given, data\n"
+      << "                       will be read from stdin.\n"
+      << "    -m, --multiply=<N> Request each URI <N> times. By default, same\n"
+      << "                       URI is not requested twice. This option\n"
+      << "                       disables it too.\n"
       << std::endl;
 }
 
@@ -697,10 +952,12 @@ int main(int argc, char **argv)
       {"help", no_argument, 0, 'h' },
       {"header", required_argument, 0, 'H' },
       {"no-tls", no_argument, &flag, 3 },
+      {"data", required_argument, 0, 'd' },
+      {"multiply", required_argument, 0, 'm' },
       {0, 0, 0, 0 }
     };
     int option_index = 0;
-    int c = getopt_long(argc, argv, "OanhH:v23st:w:", long_options,
+    int c = getopt_long(argc, argv, "Oad:m:nhH:v23st:w:", long_options,
                         &option_index);
     if(c == -1) {
       break;
@@ -774,6 +1031,12 @@ int main(int argc, char **argv)
     case 's':
       config.stat = true;
       break;
+    case 'd':
+      config.datafile = strcmp("-", optarg) == 0 ? "/dev/stdin" : optarg;
+      break;
+    case 'm':
+      config.multiply = strtoul(optarg, 0, 10);
+      break;
     case '?':
       exit(EXIT_FAILURE);
     case 0:
@@ -804,6 +1067,8 @@ int main(int argc, char **argv)
       exit(EXIT_FAILURE);
     }
   }
+
+  set_color_output(isatty(fileno(stdout)));
 
   struct sigaction act;
   memset(&act, 0, sizeof(struct sigaction));

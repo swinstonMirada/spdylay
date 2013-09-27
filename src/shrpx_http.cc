@@ -24,12 +24,9 @@
  */
 #include "shrpx_http.h"
 
-#include <sstream>
-
 #include "shrpx_config.h"
 #include "shrpx_log.h"
 #include "util.h"
-#include "uri.h"
 
 using namespace spdylay;
 
@@ -37,7 +34,7 @@ namespace shrpx {
 
 namespace http {
 
-const char* get_status_string(int status_code)
+std::string get_status_string(unsigned int status_code)
 {
   switch(status_code) {
   case 100: return "100 Continue";
@@ -81,22 +78,26 @@ const char* get_status_string(int status_code)
   case 503: return "503 Service Unavailable";
   case 504: return "504 Gateway Timeout";
   case 505: return "505 HTTP Version Not Supported";
-  default: return "";
+  default: return util::utos(status_code);
   }
 }
 
-std::string create_error_html(int status_code)
+std::string create_error_html(unsigned int status_code)
 {
-  std::stringstream ss;
-  const char *status = http::get_status_string(status_code);
-  ss << "<html><head><title>" << status << "</title></head><body>"
-     << "<h1>" << status << "</h1>"
-     << "<hr>"
-     << "<address>" << get_config()->server_name << " at port "
-     << get_config()->port
-     << "</address>"
-     << "</body></html>\n";
-  return ss.str();
+  std::string res;
+  res.reserve(512);
+  std::string status = http::get_status_string(status_code);
+  res += "<html><head><title>";
+  res += status;
+  res += "</title></head><body><h1>";
+  res += status;
+  res += "</h1><hr><address>";
+  res += get_config()->server_name;
+  res += " at port ";
+  res += util::utos(get_config()->port);
+  res += "</address>";
+  res += "</body></html>";
+  return res;
 }
 
 std::string create_via_header_value(int major, int minor)
@@ -109,27 +110,6 @@ std::string create_via_header_value(int major, int minor)
   return hdrs;
 }
 
-std::string modify_location_header_value(const std::string& uri)
-{
-  std::string norm_uri = uri;
-  if(util::istartsWith(uri.c_str(), "//")) {
-    norm_uri.insert(0, "http:");
-  } else if(!util::istartsWith(uri.c_str(), "http://")) {
-    return uri;
-  }
-  uri::UriStruct us;
-  if(uri::parse(us, norm_uri)) {
-    if(util::strieq(us.host.c_str(), get_config()->downstream_host) &&
-       us.port == get_config()->downstream_port) {
-      us.protocol = "https";
-      us.host = get_config()->host;
-      us.port = get_config()->port;
-      return uri::construct(us);
-    }
-  }
-  return uri;
-}
-
 void capitalize(std::string& s, size_t offset)
 {
   s[offset] = util::upcase(s[offset]);
@@ -138,6 +118,20 @@ void capitalize(std::string& s, size_t offset)
       s[i] = util::upcase(s[i]);
     } else {
       s[i] = util::lowcase(s[i]);
+    }
+  }
+}
+
+bool check_header_value(const char *value)
+{
+  return strpbrk(value, "\r\n") == 0;
+}
+
+void sanitize_header_value(std::string& s, size_t offset)
+{
+  for(size_t i = offset, eoi = s.size(); i < eoi; ++i) {
+    if(s[i] == '\r' || s[i] == '\n') {
+      s[i] = ' ';
     }
   }
 }
@@ -171,6 +165,14 @@ std::string colorizeHeaders(const char *hdrs)
     p = np+1;
   }
   return nhdrs;
+}
+
+void copy_url_component(std::string& dest, http_parser_url *u, int field,
+                        const char* url)
+{
+  if(u->field_set & (1 << field)) {
+    dest.assign(url+u->field_data[field].off, u->field_data[field].len);
+  }
 }
 
 } // namespace http

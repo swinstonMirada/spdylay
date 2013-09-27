@@ -32,13 +32,24 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <vector>
+
+#include <event.h>
+#include <openssl/ssl.h>
 
 namespace shrpx {
+
+namespace ssl {
+
+struct CertLookupTree;
+
+} // namespace ssl
 
 extern const char SHRPX_OPT_PRIVATE_KEY_FILE[];
 extern const char SHRPX_OPT_PRIVATE_KEY_PASSWD_FILE[];
 extern const char SHRPX_OPT_CERTIFICATE_FILE[];
-
+extern const char SHRPX_OPT_DH_PARAM_FILE[];
+extern const char SHRPX_OPT_SUBCERT[];
 extern const char SHRPX_OPT_BACKEND[];
 extern const char SHRPX_OPT_FRONTEND[];
 extern const char SHRPX_OPT_WORKERS[];
@@ -46,8 +57,10 @@ extern const char SHRPX_OPT_SPDY_MAX_CONCURRENT_STREAMS[];
 extern const char SHRPX_OPT_LOG_LEVEL[];
 extern const char SHRPX_OPT_DAEMON[];
 extern const char SHRPX_OPT_SPDY_PROXY[];
+extern const char SHRPX_OPT_SPDY_BRIDGE[];
 extern const char SHRPX_OPT_CLIENT_PROXY[];
 extern const char SHRPX_OPT_ADD_X_FORWARDED_FOR[];
+extern const char SHRPX_OPT_NO_VIA[];
 extern const char SHRPX_OPT_FRONTEND_SPDY_READ_TIMEOUT[];
 extern const char SHRPX_OPT_FRONTEND_READ_TIMEOUT[];
 extern const char SHRPX_OPT_FRONTEND_WRITE_TIMEOUT[];
@@ -57,23 +70,39 @@ extern const char SHRPX_OPT_ACCESSLOG[];
 extern const char SHRPX_OPT_BACKEND_KEEP_ALIVE_TIMEOUT[];
 extern const char SHRPX_OPT_FRONTEND_SPDY_WINDOW_BITS[];
 extern const char SHRPX_OPT_BACKEND_SPDY_WINDOW_BITS[];
+extern const char SHRPX_OPT_FRONTEND_SPDY_NO_TLS[];
+extern const char SHRPX_OPT_FRONTEND_SPDY_PROTO[];
+extern const char SHRPX_OPT_BACKEND_SPDY_NO_TLS[];
+extern const char SHRPX_OPT_BACKEND_SPDY_PROTO[];
 extern const char SHRPX_OPT_PID_FILE[];
 extern const char SHRPX_OPT_USER[];
 extern const char SHRPX_OPT_SYSLOG[];
 extern const char SHRPX_OPT_SYSLOG_FACILITY[];
 extern const char SHRPX_OPT_BACKLOG[];
 extern const char SHRPX_OPT_CIPHERS[];
+extern const char SHRPX_OPT_HONOR_CIPHER_ORDER[];
 extern const char SHRPX_OPT_CLIENT[];
 extern const char SHRPX_OPT_INSECURE[];
 extern const char SHRPX_OPT_CACERT[];
 extern const char SHRPX_OPT_BACKEND_IPV4[];
 extern const char SHRPX_OPT_BACKEND_IPV6[];
+extern const char SHRPX_OPT_BACKEND_HTTP_PROXY_URI[];
+extern const char SHRPX_OPT_BACKEND_TLS_SNI_FIELD[];
+extern const char SHRPX_OPT_READ_RATE[];
+extern const char SHRPX_OPT_READ_BURST[];
+extern const char SHRPX_OPT_WRITE_RATE[];
+extern const char SHRPX_OPT_WRITE_BURST[];
 
 union sockaddr_union {
   sockaddr sa;
   sockaddr_storage storage;
   sockaddr_in6 in6;
   sockaddr_in in;
+};
+
+enum shrpx_proto {
+  PROTO_SPDY,
+  PROTO_HTTP
 };
 
 struct Config {
@@ -84,6 +113,9 @@ struct Config {
   char *private_key_file;
   char *private_key_passwd;
   char *cert_file;
+  char *dh_param_file;
+  SSL_CTX *default_ssl_ctx;
+  ssl::CertLookupTree *cert_tree;
   bool verify_client;
   const char *server_name;
   char *downstream_host;
@@ -100,11 +132,18 @@ struct Config {
   size_t num_worker;
   size_t spdy_max_concurrent_streams;
   bool spdy_proxy;
+  bool spdy_bridge;
   bool client_proxy;
   bool add_x_forwarded_for;
+  bool no_via;
   bool accesslog;
   size_t spdy_upstream_window_bits;
   size_t spdy_downstream_window_bits;
+  bool spdy_upstream_no_tls;
+  uint16_t spdy_upstream_version;
+  bool spdy_downstream_no_tls;
+  uint16_t spdy_downstream_version;
+  char *backend_tls_sni_name;
   char *pid_file;
   uid_t uid;
   gid_t gid;
@@ -115,15 +154,34 @@ struct Config {
   bool use_syslog;
   int backlog;
   char *ciphers;
+  bool honor_cipher_order;
   bool client;
   // true if --client or --client-proxy are enabled.
   bool client_mode;
+  // downstream protocol; this will be determined by given options.
+  shrpx_proto downstream_proto;
   bool insecure;
   char *cacert;
   bool backend_ipv4;
   bool backend_ipv6;
   // true if stderr refers to a terminal.
   bool tty;
+  // userinfo in http proxy URI, not percent-encoded form
+  char *downstream_http_proxy_userinfo;
+  // host in http proxy URI
+  char *downstream_http_proxy_host;
+  // port in http proxy URI
+  uint16_t downstream_http_proxy_port;
+  // binary form of http proxy host and port
+  sockaddr_union downstream_http_proxy_addr;
+  // actual size of downstream_http_proxy_addr
+  size_t downstream_http_proxy_addrlen;
+  // Rate limit configuration
+  ev_token_bucket_cfg *rate_limit_cfg;
+  size_t read_rate;
+  size_t read_burst;
+  size_t write_rate;
+  size_t write_burst;
 };
 
 const Config* get_config();
