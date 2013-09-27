@@ -164,16 +164,6 @@ fi
 AM_CONDITIONAL([HAVE_LIBEVENT_OPENSSL],
                [ test "x${have_libevent_openssl}" = "xyes" ])
 
-# libxml2 (for examples/spdycat)
-have_libxml2=no
-if test "x$with_libxml2" != "xno"; then
-  AM_PATH_XML2(2.7.7, [have_libxml2=yes], [have_libxml2=no])
-  if test "x${have_libxml2}" = "xyes"; then
-    AC_DEFINE([HAVE_LIBXML2], [1], [Define to 1 if you have `libxml2` library.])
-  fi
-fi
-AM_CONDITIONAL([HAVE_LIBXML2], [ test "x${have_libxml2}" = "xyes" ])
-
 # The src programs depend on OpenSSL
 enable_src=no
 if test "x${request_src}" = "xyes" &&

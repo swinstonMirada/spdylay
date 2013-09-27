@@ -63,10 +63,6 @@ endif # HAVE_KQUEUE
 HTML_PARSER_OBJECTS =
 HTML_PARSER_HFILES = HtmlParser.h
 
-if HAVE_LIBXML2
-HTML_PARSER_OBJECTS += HtmlParser.cc
-endif # HAVE_LIBXML2
-
 spdycat_SOURCES = ${HELPER_OBJECTS} ${HELPER_HFILES} spdycat.cc \
 	${HTML_PARSER_OBJECTS} ${HTML_PARSER_HFILES} \
 	http-parser/http_parser.c http-parser/http_parser.h
