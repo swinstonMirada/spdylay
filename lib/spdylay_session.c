@@ -1556,6 +1556,7 @@ int spdylay_session_send(spdylay_session *session)
     } else {
       session->aob.framebufoff += sentlen;
       if(session->flow_control &&
+	 session->aob.item != NULL && 
          session->aob.item->frame_cat == SPDYLAY_DATA) {
         spdylay_data *frame;
         spdylay_stream *stream;
