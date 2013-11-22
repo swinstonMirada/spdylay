@@ -57,8 +57,7 @@ Downstream::Downstream(Upstream *upstream, int stream_id, int priority)
     chunked_response_(false),
     response_connection_close_(false),
     response_header_key_prev_(false),
-    response_body_buf_(0),
-    recv_window_size_(0)
+    response_body_buf_(0)
 {}
 
 Downstream::~Downstream()
@@ -136,20 +135,6 @@ void check_expect_100_continue(bool *res,
                                const Headers::value_type& item)
 {
   return check_header_field(res, item, "expect", "100-continue");
-}
-} // namespace
-
-namespace {
-void check_connection_close(bool *connection_close,
-                            const Headers::value_type &item)
-{
-  if(util::strieq(item.first.c_str(), "connection")) {
-    if(util::strifind(item.second.c_str(), "close")) {
-      *connection_close = true;
-    } else if(util::strifind(item.second.c_str(), "keep-alive")) {
-      *connection_close = false;
-    }
-  }
 }
 } // namespace
 
@@ -292,6 +277,10 @@ bool Downstream::get_output_buffer_full()
 // Downstream. Otherwise, the program will crash.
 int Downstream::push_request_headers()
 {
+  if(!dconn_) {
+    DLOG(INFO, this) << "dconn_ is NULL";
+    return -1;
+  }
   return dconn_->push_request_headers();
 }
 
@@ -308,6 +297,10 @@ int Downstream::push_upload_data_chunk(const uint8_t *data, size_t datalen)
 
 int Downstream::end_upload_data()
 {
+  if(!dconn_) {
+    DLOG(INFO, this) << "dconn_ is NULL";
+    return -1;
+  }
   return dconn_->end_upload_data();
 }
 
@@ -411,6 +404,10 @@ void Downstream::set_response_connection_close(bool f)
 
 int Downstream::on_read()
 {
+  if(!dconn_) {
+    DLOG(INFO, this) << "dconn_ is NULL";
+    return -1;
+  }
   return dconn_->on_read();
 }
 
@@ -458,19 +455,9 @@ void Downstream::set_priority(int pri)
   priority_ = pri;
 }
 
-int32_t Downstream::get_recv_window_size() const
+int Downstream::get_priority() const
 {
-  return recv_window_size_;
-}
-
-void Downstream::inc_recv_window_size(int32_t amount)
-{
-  recv_window_size_ += amount;
-}
-
-void Downstream::set_recv_window_size(int32_t new_size)
-{
-  recv_window_size_ = new_size;
+  return priority_;
 }
 
 bool Downstream::tunnel_established() const

@@ -326,7 +326,6 @@ void fill_default_config()
 
   mod_config()->verbose = false;
   mod_config()->daemon = false;
-  mod_config()->verify_client = false;
 
   mod_config()->server_name = "shrpx spdylay/" SPDYLAY_VERSION;
   set_config_str(&mod_config()->host, "0.0.0.0");
@@ -360,11 +359,15 @@ void fill_default_config()
   // 64KiB, which is SPDY/3 default.
   mod_config()->spdy_upstream_window_bits = 16;
   mod_config()->spdy_downstream_window_bits = 16;
+  // SPDY/3.1 has connection-level flow control. The default window
+  // size is 64KB.
+  mod_config()->spdy_upstream_connection_window_bits = 16;
+  mod_config()->spdy_downstream_connection_window_bits = 16;
 
   mod_config()->spdy_upstream_no_tls = false;
-  mod_config()->spdy_upstream_version = 3;
+  mod_config()->spdy_upstream_version = SPDYLAY_PROTO_SPDY3_1;
   mod_config()->spdy_downstream_no_tls = false;
-  mod_config()->spdy_downstream_version = 3;
+  mod_config()->spdy_downstream_version = SPDYLAY_PROTO_SPDY3_1;
 
   set_config_str(&mod_config()->downstream_host, "127.0.0.1");
   mod_config()->downstream_port = 80;
@@ -407,6 +410,8 @@ void fill_default_config()
   mod_config()->read_burst = 4*1024*1024;
   mod_config()->write_rate = 0;
   mod_config()->write_burst = 0;
+  mod_config()->verify_client = false;
+  mod_config()->verify_client_cacert = 0;
 }
 } // namespace
 
@@ -577,6 +582,12 @@ void print_help(std::ostream& out)
       << "                       Path to file that contains DH parameters in\n"
       << "                       PEM format. Without this option, DHE cipher\n"
       << "                       suites are not available.\n"
+      << "    --verify-client    Require and verify client certificate.\n"
+      << "    --verify-client-cacert=<PATH>\n"
+      << "                       Path to file that contains CA certificates\n"
+      << "                       to verify client certificate.\n"
+      << "                       The file must be in PEM format. It can\n"
+      << "                       contain multiple certificates.\n"
       << "\n"
       << "  SPDY:\n"
       << "    -c, --spdy-max-concurrent-streams=<NUM>\n"
@@ -585,10 +596,15 @@ void print_help(std::ostream& out)
       << "                       Default: "
       << get_config()->spdy_max_concurrent_streams << "\n"
       << "    --frontend-spdy-window-bits=<N>\n"
-      << "                       Sets the initial window size of SPDY\n"
-      << "                       frontend connection to 2**<N>.\n"
+      << "                       Sets the per-stream initial window size of\n"
+      << "                       SPDY frontend connection to 2**<N>.\n"
       << "                       Default: "
       << get_config()->spdy_upstream_window_bits << "\n"
+      << "    --frontend-spdy-connection-window-bits=<N>\n"
+      << "                       Sets the per-connection window size of SPDY\n"
+      << "                       frontend connection to 2**<N>.\n"
+      << "                       Default: "
+      << get_config()->spdy_upstream_connection_window_bits << "\n"
       << "    --frontend-spdy-no-tls\n"
       << "                       Disable SSL/TLS on frontend SPDY\n"
       << "                       connections. SPDY protocol must be specified\n"
@@ -597,13 +613,17 @@ void print_help(std::ostream& out)
       << "    --frontend-spdy-proto\n"
       << "                       Specify SPDY protocol used in frontend\n"
       << "                       connection if --frontend-spdy-no-tls is\n"
-      << "                       used. Default: spdy/"
-      << get_config()->spdy_upstream_version << "\n"
+      << "                       used. Default: spdy/3.1\n"
       << "    --backend-spdy-window-bits=<N>\n"
-      << "                       Sets the initial window size of SPDY\n"
-      << "                       backend connection to 2**<N>.\n"
+      << "                       Sets the per-stream initial window size of\n"
+      << "                       SPDY backend connection to 2**<N>.\n"
       << "                       Default: "
       << get_config()->spdy_downstream_window_bits << "\n"
+      << "    --backend-spdy-connection-window-bits=<N>\n"
+      << "                       Sets the per-connection window size of SPDY\n"
+      << "                       backend connection to 2**<N>.\n"
+      << "                       Default: "
+      << get_config()->spdy_downstream_connection_window_bits << "\n"
       << "    --backend-spdy-no-tls\n"
       << "                       Disable SSL/TLS on backend SPDY connections.\n"
       << "                       SPDY protocol must be specified using\n"
@@ -611,8 +631,7 @@ void print_help(std::ostream& out)
       << "    --backend-spdy-proto\n"
       << "                       Specify SPDY protocol used in backend\n"
       << "                       connection if --backend-spdy-no-tls is used.\n"
-      << "                       Default: spdy/"
-      << get_config()->spdy_downstream_version << "\n"
+      << "                       Default: spdy/3.1\n"
       << "\n"
       << "  Mode:\n"
       << "    -s, --spdy-proxy   Enable secure SPDY proxy mode.\n"
@@ -722,6 +741,10 @@ int main(int argc, char **argv)
       {"read-burst", required_argument, &flag, 35},
       {"write-rate", required_argument, &flag, 36},
       {"write-burst", required_argument, &flag, 37},
+      {"verify-client", no_argument, &flag, 38},
+      {"verify-client-cacert", required_argument, &flag, 39},
+      {"frontend-spdy-connection-window-bits", required_argument, &flag, 40},
+      {"backend-spdy-connection-window-bits", required_argument, &flag, 41},
       {0, 0, 0, 0 }
     };
     int option_index = 0;
@@ -931,6 +954,27 @@ int main(int argc, char **argv)
         // --write-burst
         cmdcfgs.push_back(std::make_pair(SHRPX_OPT_WRITE_BURST, optarg));
         break;
+      case 38:
+        // --verify-client
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_VERIFY_CLIENT, "yes"));
+        break;
+      case 39:
+        // --verify-client-cacert
+        cmdcfgs.push_back(std::make_pair(SHRPX_OPT_VERIFY_CLIENT_CACERT,
+                                         optarg));
+        break;
+      case 40:
+        // --frontend-spdy-connection-window-bits
+        cmdcfgs.push_back(std::make_pair
+                          (SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS,
+                           optarg));
+        break;
+      case 41:
+        // --backend-spdy-connection-window-bits
+        cmdcfgs.push_back(std::make_pair
+                          (SHRPX_OPT_BACKEND_SPDY_CONNECTION_WINDOW_BITS,
+                           optarg));
+        break;
       default:
         break;
       }
@@ -965,6 +1009,22 @@ int main(int argc, char **argv)
   for(size_t i = 0, len = cmdcfgs.size(); i < len; ++i) {
     if(parse_config(cmdcfgs[i].first, cmdcfgs[i].second) == -1) {
       LOG(FATAL) << "Failed to parse command-line argument.";
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if(!get_config()->subcerts.empty()) {
+    mod_config()->cert_tree = ssl::cert_lookup_tree_new();
+  }
+
+  for(size_t i = 0; i < get_config()->subcerts.size(); ++i) {
+    const std::pair<std::string, std::string>& keycert =
+      get_config()->subcerts[i];
+    SSL_CTX *ssl_ctx = ssl::create_ssl_context(keycert.first.c_str(),
+                                               keycert.second.c_str());
+    if(ssl::cert_lookup_tree_add_cert_from_file
+       (get_config()->cert_tree, ssl_ctx, keycert.second.c_str()) == -1) {
+      LOG(FATAL) << "Failed to add sub certificate.";
       exit(EXIT_FAILURE);
     }
   }

@@ -150,7 +150,6 @@ void notify_readcb(bufferevent *bev, void *arg)
     rv = spdy->initiate_connection();
     if(rv != 0) {
       SSLOG(FATAL, spdy) << "Could not initiate notification connection";
-      DIE();
     }
     break;
   case SpdySession::CONNECTED:
@@ -583,7 +582,11 @@ int SpdySession::submit_window_update(SpdyDownstreamConnection *dconn,
   assert(state_ == CONNECTED);
   int rv;
   int32_t stream_id;
-  stream_id = dconn->get_downstream()->get_downstream_stream_id();
+  if(dconn) {
+    stream_id = dconn->get_downstream()->get_downstream_stream_id();
+  } else {
+    stream_id = 0;
+  }
   rv = spdylay_submit_window_update(session_, stream_id, amount);
   if(rv < SPDYLAY_ERR_FATAL) {
     SSLOG(FATAL, this) << "spdylay_submit_window_update() failed: "
@@ -591,11 +594,6 @@ int SpdySession::submit_window_update(SpdyDownstreamConnection *dconn,
     return -1;
   }
   return 0;
-}
-
-int32_t SpdySession::get_initial_window_size() const
-{
-  return 1 << get_config()->spdy_downstream_window_bits;
 }
 
 bool SpdySession::get_flow_control() const
@@ -899,14 +897,31 @@ void on_data_chunk_recv_callback(spdylay_session *session,
   }
 
   if(spdy->get_flow_control()) {
-    sd->dconn->inc_recv_window_size(len);
-    if(sd->dconn->get_recv_window_size() >
-       std::max(65536, spdy->get_initial_window_size())) {
+    if(spdylay_session_get_recv_data_length(session) >
+       std::max(SPDYLAY_INITIAL_WINDOW_SIZE,
+                1 << get_config()->spdy_downstream_connection_window_bits)) {
       if(LOG_ENABLED(INFO)) {
-        SSLOG(INFO, spdy) << "Flow control error: recv_window_size="
-                          << sd->dconn->get_recv_window_size()
-                          << ", initial_window_size="
-                          << spdy->get_initial_window_size();
+        SSLOG(INFO, spdy)
+          << "Flow control error on connection: "
+          << "recv_window_size="
+          << spdylay_session_get_recv_data_length(session)
+          << ", window_size="
+          << (1 << get_config()->spdy_downstream_connection_window_bits);
+      }
+      spdylay_session_fail_session(session, SPDYLAY_GOAWAY_PROTOCOL_ERROR);
+      downstream->set_response_state(Downstream::MSG_RESET);
+      call_downstream_readcb(spdy, downstream);
+      return;
+    }
+    if(spdylay_session_get_stream_recv_data_length(session, stream_id) >
+       std::max(SPDYLAY_INITIAL_WINDOW_SIZE,
+                1 << get_config()->spdy_downstream_window_bits)) {
+      if(LOG_ENABLED(INFO)) {
+        SSLOG(INFO, spdy)
+          << "Flow control error: recv_window_size="
+          << spdylay_session_get_stream_recv_data_length(session, stream_id)
+          << ", initial_window_size="
+          << (1 << get_config()->spdy_downstream_window_bits);
       }
       spdylay_submit_rst_stream(session, stream_id,
                                 SPDYLAY_FLOW_CONTROL_ERROR);
@@ -1057,7 +1072,7 @@ int SpdySession::on_connect()
     return -1;
   }
 
-  if(version == SPDYLAY_PROTO_SPDY3) {
+  if(version >= SPDYLAY_PROTO_SPDY3) {
     int val = 1;
     flow_control_ = true;
     rv = spdylay_session_set_option(session_,
@@ -1074,7 +1089,7 @@ int SpdySession::on_connect()
   entry[0].flags = SPDYLAY_ID_FLAG_SETTINGS_NONE;
 
   entry[1].settings_id = SPDYLAY_SETTINGS_INITIAL_WINDOW_SIZE;
-  entry[1].value = get_initial_window_size();
+  entry[1].value = 1 << get_config()->spdy_downstream_window_bits;
   entry[1].flags = SPDYLAY_ID_FLAG_SETTINGS_NONE;
 
   rv = spdylay_submit_settings
@@ -1083,6 +1098,18 @@ int SpdySession::on_connect()
   if(rv != 0) {
     return -1;
   }
+
+  if(version >= SPDYLAY_PROTO_SPDY3_1 &&
+     get_config()->spdy_downstream_connection_window_bits > 16) {
+    int32_t delta =
+      (1 << get_config()->spdy_downstream_connection_window_bits)
+      - SPDYLAY_INITIAL_WINDOW_SIZE;
+    rv = spdylay_submit_window_update(session_, 0, delta);
+    if(rv != 0) {
+      return -1;
+    }
+  }
+
   rv = send();
   if(rv != 0) {
     return -1;
@@ -1176,6 +1203,11 @@ int SpdySession::get_state() const
 void SpdySession::set_state(int state)
 {
   state_ = state;
+}
+
+spdylay_session* SpdySession::get_session() const
+{
+  return session_;
 }
 
 } // namespace shrpx

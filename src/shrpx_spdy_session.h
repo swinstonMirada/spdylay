@@ -72,8 +72,6 @@ public:
 
   int submit_window_update(SpdyDownstreamConnection *dconn, int32_t amount);
 
-  int32_t get_initial_window_size() const;
-
   bool get_flow_control() const;
 
   int resume_data(SpdyDownstreamConnection *dconn);
@@ -94,6 +92,8 @@ public:
 
   int get_state() const;
   void set_state(int state);
+
+  spdylay_session* get_session() const;
 
   enum {
     // Disconnected

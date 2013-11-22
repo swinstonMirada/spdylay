@@ -55,7 +55,7 @@ public:
   spdylay_session* get_spdy_session();
 
   int rst_stream(Downstream *downstream, int status_code);
-  int window_update(Downstream *downstream);
+  int window_update(Downstream *downstream, int32_t delta);
   int error_reply(Downstream *downstream, unsigned int status_code);
 
   virtual void pause_read(IOCtrlReason reason);
@@ -67,12 +67,10 @@ public:
   virtual int on_downstream_body_complete(Downstream *downstream);
 
   bool get_flow_control() const;
-  int32_t get_initial_window_size() const;
 private:
   ClientHandler *handler_;
   spdylay_session *session_;
   bool flow_control_;
-  int32_t initial_window_size_;
   DownstreamQueue downstream_queue_;
 };
 

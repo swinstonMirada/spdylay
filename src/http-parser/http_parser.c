@@ -238,6 +238,7 @@ enum state
   , s_start_req_or_res
   , s_res_or_resp_H
   , s_start_res
+  , s_res_proto_custom
   , s_res_H
   , s_res_HT
   , s_res_HTT
@@ -634,7 +635,17 @@ size_t http_parser_execute (http_parser *parser,
 
     if (PARSING_HEADER(parser->state)) {
       ++parser->nread;
-      /* Buffer overflow attack */
+      /* Don't allow the total size of the HTTP headers (including the status
+       * line) to exceed HTTP_MAX_HEADER_SIZE.  This check is here to protect
+       * embedders against denial-of-service attacks where the attacker feeds
+       * us a never-ending header that the embedder keeps buffering.
+       *
+       * This check is arguably the responsibility of embedders but we're doing
+       * it on the embedder's behalf because most won't bother and this way we
+       * make the web a little safer.  HTTP_MAX_HEADER_SIZE is still far bigger
+       * than any reasonable request or response so this should never affect
+       * day-to-day operation.
+       */
       if (parser->nread > HTTP_MAX_HEADER_SIZE) {
         SET_ERRNO(HPE_HEADER_OVERFLOW);
         goto error;
@@ -706,6 +717,10 @@ size_t http_parser_execute (http_parser *parser,
             break;
 
           default:
+            if(TOKEN(ch)) {
+              parser->state = s_res_proto_custom;
+              break;
+            }
             SET_ERRNO(HPE_INVALID_CONSTANT);
             goto error;
         }
@@ -713,6 +728,21 @@ size_t http_parser_execute (http_parser *parser,
         CALLBACK_NOTIFY(message_begin);
         break;
       }
+
+      /* Custom HTTP-version string (e.g., ICY) */
+      case s_res_proto_custom:
+        if (ch == ' ') {
+          /* We assume this is HTTP/1.0 */
+          parser->http_major = 1;
+          parser->http_minor = 0;
+          parser->state = s_res_first_status_code;
+          break;
+        }
+        if (!TOKEN(ch)) {
+          SET_ERRNO(HPE_INVALID_CONSTANT);
+          goto error;
+        }
+        break;
 
       case s_res_H:
         STRICT_CHECK(ch != 'T');
@@ -929,6 +959,7 @@ size_t http_parser_execute (http_parser *parser,
           } else if (parser->index == 2  && ch == 'P') {
             parser->method = HTTP_COPY;
           } else {
+            SET_ERRNO(HPE_INVALID_METHOD);
             goto error;
           }
         } else if (parser->method == HTTP_MKCOL) {
@@ -941,12 +972,14 @@ size_t http_parser_execute (http_parser *parser,
           } else if (parser->index == 2 && ch == 'A') {
             parser->method = HTTP_MKACTIVITY;
           } else {
+            SET_ERRNO(HPE_INVALID_METHOD);
             goto error;
           }
         } else if (parser->method == HTTP_SUBSCRIBE) {
           if (parser->index == 1 && ch == 'E') {
             parser->method = HTTP_SEARCH;
           } else {
+            SET_ERRNO(HPE_INVALID_METHOD);
             goto error;
           }
         } else if (parser->index == 1 && parser->method == HTTP_POST) {
@@ -957,13 +990,27 @@ size_t http_parser_execute (http_parser *parser,
           } else if (ch == 'A') {
             parser->method = HTTP_PATCH;
           } else {
+            SET_ERRNO(HPE_INVALID_METHOD);
             goto error;
           }
         } else if (parser->index == 2) {
           if (parser->method == HTTP_PUT) {
-            if (ch == 'R') parser->method = HTTP_PURGE;
+            if (ch == 'R') {
+              parser->method = HTTP_PURGE;
+            } else {
+              SET_ERRNO(HPE_INVALID_METHOD);
+              goto error;
+            }
           } else if (parser->method == HTTP_UNLOCK) {
-            if (ch == 'S') parser->method = HTTP_UNSUBSCRIBE;
+            if (ch == 'S') {
+              parser->method = HTTP_UNSUBSCRIBE;
+            } else {
+              SET_ERRNO(HPE_INVALID_METHOD);
+              goto error;
+            }
+          } else {
+            SET_ERRNO(HPE_INVALID_METHOD);
+            goto error;
           }
         } else if (parser->index == 4 && parser->method == HTTP_PROPFIND && ch == 'P') {
           parser->method = HTTP_PROPPATCH;
@@ -2177,4 +2224,11 @@ http_parser_pause(http_parser *parser, int paused) {
 int
 http_body_is_final(const struct http_parser *parser) {
     return parser->state == s_message_done;
+}
+
+unsigned long
+http_parser_version(void) {
+  return HTTP_PARSER_VERSION_MAJOR * 0x10000 |
+         HTTP_PARSER_VERSION_MINOR * 0x00100 |
+         HTTP_PARSER_VERSION_PATCH * 0x00001;
 }

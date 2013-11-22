@@ -50,8 +50,7 @@ SpdyDownstreamConnection::SpdyDownstreamConnection
   : DownstreamConnection(client_handler),
     spdy_(client_handler->get_spdy_session()),
     request_body_buf_(0),
-    sd_(0),
-    recv_window_size_(0)
+    sd_(0)
 {}
 
 SpdyDownstreamConnection::~SpdyDownstreamConnection()
@@ -111,7 +110,6 @@ int SpdyDownstreamConnection::attach_downstream(Downstream *downstream)
   }
   downstream->set_downstream_connection(this);
   downstream_ = downstream;
-  recv_window_size_ = 0;
   return 0;
 }
 
@@ -343,16 +341,19 @@ int SpdyDownstreamConnection::push_request_headers()
     }
     DCLOG(INFO, this) << "HTTP request headers\n" << ss.str();
   }
-
+  int pri = downstream_->get_priority();
+  if(pri == -1) {
+    pri = spdylay_session_get_pri_lowest(spdy_->get_session());
+  }
   if(downstream_->get_request_method() == "CONNECT" ||
      chunked_encoding || content_length) {
     // Request-body is expected.
     spdylay_data_provider data_prd;
     data_prd.source.ptr = this;
     data_prd.read_callback = spdy_data_read_callback;
-    rv = spdy_->submit_request(this, 0, nv, &data_prd);
+    rv = spdy_->submit_request(this, pri, nv, &data_prd);
   } else {
-    rv = spdy_->submit_request(this, 0, nv, 0);
+    rv = spdy_->submit_request(this, pri, nv, 0);
   }
   delete [] nv;
   if(rv != 0) {
@@ -396,19 +397,32 @@ int SpdyDownstreamConnection::end_upload_data()
 
 int SpdyDownstreamConnection::resume_read(IOCtrlReason reason)
 {
-  int rv;
+  int rv1 = 0, rv2 = 0;
   if(spdy_->get_state() == SpdySession::CONNECTED &&
-     spdy_->get_flow_control() &&
-     downstream_ && downstream_->get_downstream_stream_id() != -1 &&
-     recv_window_size_ >= spdy_->get_initial_window_size()/2) {
-    rv = spdy_->submit_window_update(this, recv_window_size_);
-    if(rv == -1) {
-      return -1;
+     spdy_->get_flow_control()) {
+    int32_t delta;
+    delta = http::determine_window_update_transmission
+      (spdy_->get_session(), 0,
+       1 << get_config()->spdy_downstream_connection_window_bits);
+    if(delta != -1) {
+      rv1 = spdy_->submit_window_update(0, delta);
+      if(rv1 == 0) {
+        spdy_->notify();
+      }
     }
-    spdy_->notify();
-    recv_window_size_ = 0;
+    if(downstream_ && downstream_->get_downstream_stream_id() != -1) {
+      delta = http::determine_window_update_transmission
+        (spdy_->get_session(), downstream_->get_downstream_stream_id(),
+         1 << get_config()->spdy_downstream_window_bits);
+      if(delta != -1) {
+        rv2 = spdy_->submit_window_update(this, delta);
+        if(rv2 == 0) {
+          spdy_->notify();
+        }
+      }
+    }
   }
-  return 0;
+  return (rv1 == 0 && rv2 == 0) ? 0 : -1;
 }
 
 int SpdyDownstreamConnection::on_read()
@@ -458,16 +472,6 @@ bool SpdyDownstreamConnection::get_output_buffer_full()
   } else {
     return false;
   }
-}
-
-int32_t SpdyDownstreamConnection::get_recv_window_size() const
-{
-  return recv_window_size_;
-}
-
-void SpdyDownstreamConnection::inc_recv_window_size(int32_t amount)
-{
-  recv_window_size_ += amount;
 }
 
 } // namespace shrpx

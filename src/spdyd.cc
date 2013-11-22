@@ -76,8 +76,10 @@ void print_help(std::ostream& out)
       << "                       transmission of frames and name/value pairs.\n"
       << "    -2, --spdy2        Only use SPDY/2.\n"
       << "    -3, --spdy3        Only use SPDY/3.\n"
-      << "    --no-tls           Disable SSL/TLS. Use -2 or -3 to specify\n"
-      << "                       SPDY protocol version to use.\n"
+      << "    --spdy3-1          Only use SPDY/3.1.\n"
+      << "    --no-tls           Disable SSL/TLS. Use -2, -3 or --spdy3-1 to\n"
+      << "                       specify SPDY protocol version to use.\n"
+      << "    --color            Force colored log output.\n"
       << "    -h, --help         Print this help.\n"
       << std::endl;
 }
@@ -86,6 +88,7 @@ void print_help(std::ostream& out)
 int main(int argc, char **argv)
 {
   Config config;
+  bool color = false;
   while(1) {
     int flag;
     static option long_options[] = {
@@ -97,6 +100,8 @@ int main(int argc, char **argv)
       {"spdy3", no_argument, 0, '3' },
       {"verify-client", no_argument, 0, 'V' },
       {"no-tls", no_argument, &flag, 1 },
+      {"color", no_argument, &flag, 2 },
+      {"spdy3-1", no_argument, &flag, 3 },
       {0, 0, 0, 0 }
     };
     int option_index = 0;
@@ -134,6 +139,14 @@ int main(int argc, char **argv)
         // no-tls option
         config.no_tls = true;
         break;
+      case 2:
+        // color option
+        color = true;
+        break;
+      case 3:
+        // spdy3-1 option
+        config.version = SPDYLAY_PROTO_SPDY3_1;
+        break;
       }
       break;
     default:
@@ -150,7 +163,8 @@ int main(int argc, char **argv)
 
   if(config.no_tls) {
     if(config.version == 0) {
-      std::cerr << "Specify SPDY protocol version using either -2 or -3."
+      std::cerr << "Specify SPDY protocol version using either -2, -3 or "
+                << "--spdy3-1."
                 << std::endl;
       exit(EXIT_FAILURE);
     }
@@ -174,7 +188,7 @@ int main(int argc, char **argv)
     config.htdocs = "./";
   }
 
-  set_color_output(isatty(fileno(stdout)));
+  set_color_output(color || isatty(fileno(stdout)));
 
   struct sigaction act;
   memset(&act, 0, sizeof(struct sigaction));

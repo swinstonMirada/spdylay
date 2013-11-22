@@ -76,6 +76,10 @@ const char
 SHRPX_OPT_BACKEND_KEEP_ALIVE_TIMEOUT[] = "backend-keep-alive-timeout";
 const char SHRPX_OPT_FRONTEND_SPDY_WINDOW_BITS[] = "frontend-spdy-window-bits";
 const char SHRPX_OPT_BACKEND_SPDY_WINDOW_BITS[] = "backend-spdy-window-bits";
+const char SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS[] =
+  "frontend-spdy-connection-window-bits";
+const char SHRPX_OPT_BACKEND_SPDY_CONNECTION_WINDOW_BITS[] =
+  "backend-spdy-connection-window-bits";
 const char SHRPX_OPT_FRONTEND_SPDY_NO_TLS[] = "frontend-spdy-no-tls";
 const char SHRPX_OPT_FRONTEND_SPDY_PROTO[] = "frontend-spdy-proto";
 const char SHRPX_OPT_BACKEND_SPDY_NO_TLS[] = "backend-spdy-no-tls";
@@ -98,6 +102,8 @@ const char SHRPX_OPT_READ_RATE[] = "read-rate";
 const char SHRPX_OPT_READ_BURST[] = "read-burst";
 const char SHRPX_OPT_WRITE_RATE[] = "write-rate";
 const char SHRPX_OPT_WRITE_BURST[] = "write-burst";
+const char SHRPX_OPT_VERIFY_CLIENT[] = "verify-client";
+const char SHRPX_OPT_VERIFY_CLIENT_CACERT[] = "verify-client-cacert";
 
 namespace {
 Config *config = 0;
@@ -289,6 +295,26 @@ int parse_config(const char *opt, const char *optarg)
                  << " specify the integer in the range [0, 30], inclusive";
       return -1;
     }
+  } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS) ||
+            util::strieq(opt, SHRPX_OPT_BACKEND_SPDY_CONNECTION_WINDOW_BITS)) {
+    size_t *resp;
+    const char *optname;
+    if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS)) {
+      resp = &mod_config()->spdy_upstream_connection_window_bits;
+      optname = SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS;
+    } else {
+      resp = &mod_config()->spdy_downstream_connection_window_bits;
+      optname = SHRPX_OPT_BACKEND_SPDY_CONNECTION_WINDOW_BITS;
+    }
+    errno = 0;
+    unsigned long int n = strtoul(optarg, 0, 10);
+    if(errno == 0 && n >= 16 && n < 31) {
+      *resp = n;
+    } else {
+      LOG(ERROR) << "--" << optname
+                 << " specify the integer in the range [16, 30], inclusive";
+      return -1;
+    }
   } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_NO_TLS)) {
     mod_config()->spdy_upstream_no_tls = util::strieq(optarg, "yes");
   } else if(util::strieq(opt, SHRPX_OPT_FRONTEND_SPDY_PROTO)) {
@@ -339,14 +365,7 @@ int parse_config(const char *opt, const char *optarg)
     if(sp) {
       std::string keyfile(optarg, sp);
       // TODO Do we need private key for subcert?
-      SSL_CTX *ssl_ctx = ssl::create_ssl_context(keyfile.c_str(), sp+1);
-      if(!get_config()->cert_tree) {
-        mod_config()->cert_tree = ssl::cert_lookup_tree_new();
-      }
-      if(ssl::cert_lookup_tree_add_cert_from_file(get_config()->cert_tree,
-                                                  ssl_ctx, sp+1) == -1) {
-        return -1;
-      }
+      mod_config()->subcerts.push_back(std::make_pair(keyfile, sp+1));
     }
   } else if(util::strieq(opt, SHRPX_OPT_SYSLOG)) {
     mod_config()->syslog = util::strieq(optarg, "yes");
@@ -415,6 +434,10 @@ int parse_config(const char *opt, const char *optarg)
     mod_config()->write_rate = strtoul(optarg, 0, 10);
   } else if(util::strieq(opt, SHRPX_OPT_WRITE_BURST)) {
     mod_config()->write_burst = strtoul(optarg, 0, 10);
+  } else if(util::strieq(opt, SHRPX_OPT_VERIFY_CLIENT)) {
+    mod_config()->verify_client = util::strieq(optarg, "yes");
+  } else if(util::strieq(opt, SHRPX_OPT_VERIFY_CLIENT_CACERT)) {
+    set_config_str(&mod_config()->verify_client_cacert, optarg);
   } else if(util::strieq(opt, "conf")) {
     LOG(WARNING) << "conf is ignored";
   } else {

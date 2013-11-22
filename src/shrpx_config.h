@@ -70,6 +70,8 @@ extern const char SHRPX_OPT_ACCESSLOG[];
 extern const char SHRPX_OPT_BACKEND_KEEP_ALIVE_TIMEOUT[];
 extern const char SHRPX_OPT_FRONTEND_SPDY_WINDOW_BITS[];
 extern const char SHRPX_OPT_BACKEND_SPDY_WINDOW_BITS[];
+extern const char SHRPX_OPT_FRONTEND_SPDY_CONNECTION_WINDOW_BITS[];
+extern const char SHRPX_OPT_BACKEND_SPDY_CONNECTION_WINDOW_BITS[];
 extern const char SHRPX_OPT_FRONTEND_SPDY_NO_TLS[];
 extern const char SHRPX_OPT_FRONTEND_SPDY_PROTO[];
 extern const char SHRPX_OPT_BACKEND_SPDY_NO_TLS[];
@@ -92,6 +94,8 @@ extern const char SHRPX_OPT_READ_RATE[];
 extern const char SHRPX_OPT_READ_BURST[];
 extern const char SHRPX_OPT_WRITE_RATE[];
 extern const char SHRPX_OPT_WRITE_BURST[];
+extern const char SHRPX_OPT_VERIFY_CLIENT[];
+extern const char SHRPX_OPT_VERIFY_CLIENT_CACERT[];
 
 union sockaddr_union {
   sockaddr sa;
@@ -139,6 +143,8 @@ struct Config {
   bool accesslog;
   size_t spdy_upstream_window_bits;
   size_t spdy_downstream_window_bits;
+  size_t spdy_upstream_connection_window_bits;
+  size_t spdy_downstream_connection_window_bits;
   bool spdy_upstream_no_tls;
   uint16_t spdy_upstream_version;
   bool spdy_downstream_no_tls;
@@ -182,6 +188,11 @@ struct Config {
   size_t read_burst;
   size_t write_rate;
   size_t write_burst;
+  // The list of (private key file, certificate file) pair
+  std::vector<std::pair<std::string, std::string> > subcerts;
+  // Path to file containing CA certificate solely used for client
+  // certificate validation
+  char *verify_client_cacert;
 };
 
 const Config* get_config();
