@@ -196,7 +196,10 @@ static int spdylay_session_new(spdylay_session **session_ptr,
   if(r != 0) {
     goto fail_hd_inflater;
   }
-  spdylay_map_init(&(*session_ptr)->streams);
+  r = spdylay_map_init(&(*session_ptr)->streams);
+  if(r != 0) {
+    goto fail_streams;
+  }
   r = spdylay_pq_init(&(*session_ptr)->ob_pq, spdylay_outbound_item_compar);
   if(r != 0) {
     goto fail_ob_pq;
@@ -267,7 +270,8 @@ static int spdylay_session_new(spdylay_session **session_ptr,
  fail_ob_ss_pq:
   spdylay_pq_free(&(*session_ptr)->ob_pq);
  fail_ob_pq:
-  /* No need to free (*session_ptr)->streams) here. */
+  spdylay_map_free(&(*session_ptr)->streams);
+ fail_streams:
   spdylay_zlib_inflate_free(&(*session_ptr)->hd_inflater);
  fail_hd_inflater:
   spdylay_zlib_deflate_free(&(*session_ptr)->hd_deflater);
@@ -347,6 +351,7 @@ void spdylay_session_del(spdylay_session *session)
     return;
   }
   spdylay_map_each_free(&session->streams, spdylay_free_streams, NULL);
+  spdylay_map_free(&session->streams);
   spdylay_session_ob_pq_free(&session->ob_pq);
   spdylay_session_ob_pq_free(&session->ob_ss_pq);
   spdylay_zlib_deflate_free(&session->hd_deflater);
@@ -377,6 +382,7 @@ int spdylay_session_add_frame(spdylay_session *session,
   item->seq = session->next_seq++;
   /* Set priority lowest at the moment. */
   item->pri = spdylay_session_get_pri_lowest(session);
+  item->pri_decay = 1;
   if(frame_cat == SPDYLAY_CTRL) {
     spdylay_frame *frame = (spdylay_frame*)abs_frame;
     spdylay_frame_type frame_type = frame->ctrl.hd.type;
@@ -457,6 +463,7 @@ int spdylay_session_add_frame(spdylay_session *session,
     free(item);
     return r;
   }
+  item->inipri = item->pri;
   return 0;
 }
 
@@ -1274,6 +1281,22 @@ spdylay_outbound_item* spdylay_session_pop_next_ob_item
 }
 
 /*
+ * Adjust priority of the |item|. In order to prevent the low priority
+ * streams from starving, lower the priority of the |item| by
+ * item->pri_decay. If the resulting priority exceeds lowest priority,
+ * back to the original priority.
+ */
+static void adjust_pri(spdylay_outbound_item *item, int pri_lowest)
+{
+  if(item->pri + item->pri_decay > pri_lowest) {
+    item->pri = item->inipri;
+    item->pri_decay = 1;
+    return;
+  }
+  item->pri += item->pri_decay++;
+}
+
+/*
  * Called after a frame is sent.
  *
  * This function returns 0 if it succeeds, or one of the following
@@ -1427,6 +1450,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
     } else {
       spdylay_outbound_item* next_item;
       next_item = spdylay_session_get_next_ob_item(session);
+      adjust_pri(session->aob.item, spdylay_session_get_pri_lowest(session));
       /* If priority of this stream is higher or equal to other stream
          waiting at the top of the queue, we continue to send this
          data. */
