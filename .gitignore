@@ -19,7 +19,6 @@ configure
 install-sh
 .deps/
 .libs
-lib/includes/spdylay/spdylayver.h
 lib/libspdylay.pc
 ltmain.sh
 stamp-h1
