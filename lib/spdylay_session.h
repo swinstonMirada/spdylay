@@ -80,6 +80,8 @@ typedef struct {
   SPDYLAY_INITIAL_OUTBOUND_FRAMEBUF_LENGTH
 #define SPDYLAY_INITIAL_NV_BUFFER_LENGTH 4096
 
+#define SPDYLAY_INITIAL_WINDOW_SIZE 65536
+
 /* Initial size of client certificate vector */
 #define SPDYLAY_INITIAL_CLIENT_CERT_VECTOR_LENGTH 8
 /* Maxmum size of client certificate vector */
@@ -144,15 +146,6 @@ typedef enum {
   SPDYLAY_GOAWAY_FAIL_ON_SEND = 0x4
 } spdylay_goaway_flag;
 
-typedef enum {
-  /* flow control disabled */
-  SPDYLAY_FLOW_CONTROL_NONE = 0,
-  /* stream-level flow control enabled */
-  SPDYLAY_FLOW_CONTROL_STREAM = 1,
-  /* connection-level flow control enabled */
-  SPDYLAY_FLOW_CONTROL_CONNECTION = 1 << 1
-} spdylay_flow_control_flag;
-
 struct spdylay_session {
   /* The protocol version: either SPDYLAY_PROTO_SPDY2 or
      SPDYLAY_PROTO_SPDY3  */
@@ -205,20 +198,8 @@ struct spdylay_session {
   int32_t last_good_stream_id;
 
   /* Flag to indicate whether this session enforces flow
-     control. Bitwise-OR-ing spdylay_flow_control_flag. We assume
-     following combinations only:
-
-     - SPDYLAY_FLOW_CONTROL_NONE (spdy/2)
-     - SPDYLAY_FLOW_CONTROL_STREAM (spdy/3)
-     - SPDYLAY_FLOW_CONTROL_STREAM | SPDYLAY_FLOW_CONTROL_CONNECTION (spdy/3.1)
-  */
+     control. Nonzero for flow control enabled. */
   uint8_t flow_control;
-  /* Current sender window size. This value is computed against the
-     current initial window size of remote endpoint. */
-  int32_t window_size;
-  /* Keep track of the number of bytes received without
-     WINDOW_UPDATE. */
-  int32_t recv_window_size;
 
   /* Settings value received from the remote endpoint. We just use ID
      as index. The index = 0 is unused. */

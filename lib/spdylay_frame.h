@@ -35,8 +35,6 @@
 #include "spdylay_client_cert_vector.h"
 
 #define SPDYLAY_STREAM_ID_MASK 0x7fffffff
-/* This is actually the maximum length of a control frame in SPDY/2
-   and 3. */
 #define SPDYLAY_LENGTH_MASK 0xffffff
 #define SPDYLAY_VERSION_MASK 0x7fff
 #define SPDYLAY_DELTA_WINDOW_SIZE_MASK 0x7fffffff
@@ -126,8 +124,6 @@ size_t spdylay_frame_get_len_size(uint16_t version);
  *     The version is not supported.
  * SPDYLAY_ERR_ZLIB
  *     The deflate operation failed.
- * SPDYLAY_ERR_FRAME_TOO_LARGE
- *     The length of the frame is too large.
  * SPDYLAY_ERR_NOMEM
  *     Out of memory.
  */
@@ -205,8 +201,6 @@ int spdylay_frame_unpack_syn_stream_without_nv(spdylay_syn_stream *frame,
  *     The version is not supported.
  * SPDYLAY_ERR_ZLIB
  *     The deflate operation failed.
- * SPDYLAY_ERR_FRAME_TOO_LARGE
- *     The length of the frame is too large.
  * SPDYLAY_ERR_NOMEM
  *     Out of memory.
  */
@@ -341,8 +335,6 @@ int spdylay_frame_unpack_goaway(spdylay_goaway *frame,
  *     The version is not supported.
  * SPDYLAY_ERR_ZLIB
  *     The deflate operation failed.
- * SPDYLAY_ERR_FRAME_TOO_LARGE
- *     The length of the frame is too large.
  * SPDYLAY_ERR_NOMEM
  *     Out of memory.
  */
@@ -547,8 +539,6 @@ ssize_t spdylay_frame_pack_nv(uint8_t *buf, char **nv, size_t len_size);
  *
  * SPDYLAY_ERR_ZLIB
  *     The deflate operation failed.
- * SPDYLAY_ERR_FRAME_TOO_LARGE
- *     The length of the frame is too large.
  * SPDYLAY_ERR_NOMEM
  *     Out of memory.
  */
@@ -792,13 +782,5 @@ void spdylay_frame_iv_sort(spdylay_settings_entry *iv, size_t niv);
  * If |version| is unknown, this function returns -1.
  */
 ssize_t spdylay_frame_nv_offset(spdylay_frame_type type, uint16_t version);
-
-/*
- * Checks names are not empty string and do not contain control
- * characters and values are not NULL.
- *
- * This function returns nonzero if it succeeds, or 0.
- */
-int spdylay_frame_nv_check_null(const char **nv);
 
 #endif /* SPDYLAY_FRAME_H */

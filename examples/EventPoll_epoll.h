@@ -22,24 +22,39 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef SPDYLAY_INT_H
-#define SPDYLAY_INT_H
+#ifndef EVENT_POLL_EPOLL_H
+#define EVENT_POLL_EPOLL_H
 
-#ifdef HAVE_CONFIG_H
-#  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#include <cstdlib>
 
-#include <stdint.h>
+#include <sys/epoll.h>
 
-/* Macros, types and constants for internal use */
+#include "EventPollEvent.h"
 
-typedef int (*spdylay_compar)(const void *lhs, const void *rhs);
+namespace spdylay {
 
-/* Internal error code. They must be in the range [-499, -100],
-   inclusive. */
-typedef enum {
-  SPDYLAY_ERR_CREDENTIAL_PENDING = -101,
-  SPDYLAY_ERR_FRAME_TOO_LARGE = -102
-} spdylay_internal_error;
+class EventPoll {
+public:
+  EventPoll(size_t max_events);
+  ~EventPoll();
+  // Returns 0 if this function succeeds, or -1.
+  // On success
+  int poll(int timeout);
+  // Returns number of events detected in previous call of poll().
+  int get_num_events();
+  // Returns events of p-eth event.
+  int get_events(size_t p);
+  // Returns user data of p-th event.
+  void* get_user_data(size_t p);
+  // Adds/Modifies event to watch.
+  int ctl_event(int op, int fd, int events, void *user_data);
+private:
+  int epfd_;
+  size_t max_events_;
+  epoll_event *evlist_;
+  size_t num_events_;
+};
 
-#endif /* SPDYLAY_INT_H */
+} // namespace spdylay
+
+#endif // EVENT_POLL_EPOLL_H

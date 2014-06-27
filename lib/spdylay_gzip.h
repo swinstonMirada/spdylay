@@ -33,7 +33,6 @@
 
 struct spdylay_gzip {
   z_stream zst;
-  int8_t finished;
 };
 
 #endif /* SPDYLAY_GZIP_H */

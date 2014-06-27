@@ -41,7 +41,6 @@ void test_spdylay_submit_request_with_null_data_read_callback(void);
 void test_spdylay_submit_syn_stream(void);
 void test_spdylay_submit_syn_reply(void);
 void test_spdylay_submit_headers(void);
-void test_spdylay_submit_invalid_nv(void);
 void test_spdylay_session_reply_fail(void);
 void test_spdylay_session_on_headers_received(void);
 void test_spdylay_session_on_ping_received(void);
@@ -61,7 +60,6 @@ void test_spdylay_session_stream_close_on_syn_stream(void);
 void test_spdylay_session_recv_invalid_frame(void);
 void test_spdylay_session_defer_data(void);
 void test_spdylay_session_flow_control(void);
-void test_spdylay_session_connection_flow_control(void);
 void test_spdylay_session_on_ctrl_not_send(void);
 void test_spdylay_session_on_settings_received(void);
 void test_spdylay_submit_settings(void);
@@ -73,6 +71,5 @@ void test_spdylay_session_set_option(void);
 void test_spdylay_submit_window_update(void);
 void test_spdylay_session_data_read_temporal_failure(void);
 void test_spdylay_session_recv_eof(void);
-void test_spdylay_session_recv_data(void);
 
 #endif /* SPDYLAY_SESSION_TEST_H */

@@ -26,23 +26,21 @@
 
 #include <string.h>
 
-static const spdylay_npn_proto proto_list[] = {
-  { (const unsigned char*)"spdy/3.1", 8, SPDYLAY_PROTO_SPDY3_1 },
-  { (const unsigned char*)"spdy/3", 6, SPDYLAY_PROTO_SPDY3 },
-  { (const unsigned char*)"spdy/2", 6, SPDYLAY_PROTO_SPDY2 }
-};
-
-const spdylay_npn_proto* spdylay_npn_get_proto_list(size_t *len_ptr)
-{
-  *len_ptr = sizeof(proto_list)/sizeof(spdylay_npn_proto);
-  return proto_list;
-}
+typedef struct {
+  const unsigned char *proto;
+  uint8_t len;
+  uint16_t version;
+} spdylay_npn_proto;
 
 int spdylay_select_next_protocol(unsigned char **out, unsigned char *outlen,
                                  const unsigned char *in, unsigned int inlen)
 {
   int http_selected = 0;
   unsigned int i = 0;
+  static const spdylay_npn_proto proto_list[] = {
+    { (const unsigned char*)"spdy/3", 6, SPDYLAY_PROTO_SPDY3 },
+    { (const unsigned char*)"spdy/2", 6, SPDYLAY_PROTO_SPDY2 }
+  };
   for(; i < inlen; i += in[i]+1) {
     unsigned int j;
     for(j = 0; j < sizeof(proto_list)/sizeof(spdylay_npn_proto); ++j) {
@@ -73,15 +71,11 @@ uint16_t spdylay_npn_get_version(const unsigned char *proto, size_t protolen)
   if(proto == NULL) {
     return 0;
   } else {
-    if(protolen == 8) {
-      if(memcmp("spdy/3.1", proto, 8) == 0) {
-        return SPDYLAY_PROTO_SPDY3_1;
-      }
-    } else if(protolen == 6) {
-      if(memcmp("spdy/3", proto, 6) == 0) {
-        return SPDYLAY_PROTO_SPDY3;
-      } else if(memcmp("spdy/2", proto, 6) == 0) {
+    if(protolen == 6) {
+      if(memcmp("spdy/2", proto, 6) == 0) {
         return SPDYLAY_PROTO_SPDY2;
+      } else if(memcmp("spdy/3", proto, 6) == 0) {
+        return SPDYLAY_PROTO_SPDY3;
       }
     }
     return 0;

@@ -1,90 +1,32 @@
-spdylay 1.2.1
+spdylay 0.3.0
 =============
 
 Release Note
 ------------
 
-This release fixes the bug which makes shrpx crash on downstream
-connection failure.
+This release fixes buffer overrun when a lot of streams are created.
+SPDYLAY_OPT_MAX_RECV_CTRL_FRAME_BUFFER option was added to control the
+maximum payload size of the incoming control frames.
 
 Changes
 -------
 
-* shrpx: Fix crash on downstream connection failure
+* Bump up LT version to 2.0.1.
 
-
+* Included <functional> from spdy.h
 
-spdylay 1.2.0
-=============
+* Made spdylay_strerror(0) return "Success"
 
-Release Note
-------------
+* Added SPDYLAY_OPT_MAX_RECV_CTRL_FRAME_BUFFER option.  This option
+  sets maximum receive buffer size for incoming control frame.
+  Basically the library checks the length field of the incoming
+  control frame. For frames with name/value header block, the library
+  also checks the length of inflated block is also under the
+  limit. This is done while incrementally inflating block. If the
+  length of frames with name/value header block exceeds the limit, the
+  library will issue RST_STREAM with FRAME_TOO_LARGE. For other
+  frames, it will issue GOAWAY.
 
-This release adds SPDY/3.1 support and fixes flow control bug.  The
-shrpx, SPDY proxy, got client certificate authentication.  It now also
-supports custom HTTP-version string (e.g., ICY).  The spdycat and
-spdyd got --color option to force ANSI color escape in output.
+* Incremental name/value block decompression
 
-Changes
--------
-
-* shrpx: Add options to specify per-connection window size
-
-* Interleave streams with same priority
-
-* Add SPDY/3.1 support
-
-  The added feature is connection-level flow control.
-
-* src/http-parser: Allow custom HTTP-version string (e.g., ICY)
-
-  We need HTTP major and minor version later, so we assume it is
-  HTTP/1.0 equivalent if custom HTTP-version string is used.
-
-* src/http-parser: Update to HEAD
-
-* shrpx: Add --verify-client-cacert option
-
-  Using --cacert to load certificate for client certificate
-  authentication is problematic since, --cacert is also used for
-  client mode.  This commit adds --verify-client-cacert option which
-  specify the CA certficate file used only for client certificate
-  validation.  This change also removes the default certficate load
-  function for client certificate validation.
-
-* shrpx: Add --verify-client option
-
-  This option requires client certificate and successful verification.
-  Use --cacert option to add CA certificates as necessary.
-
-* spdycat, spdyd: Add --color option to force colored log output
-
-* shrpx: Check DATA_FLAG_FIN on on_data_recv_callback
-
-* tests: Fix main test fail with address-sanitizer
-
-* Fix outbound flow control count
-
-  We wrongly added the whole payload length even if we sent part of it.
-
-* shrpx: Fix missing extension HTTP status code in response
-
-* shrpx: Add rate limit options
-
-* shrpx: Replace \r\n with space when constructing HTTP/1 headers
-
-* shrpx: Guard ecdh use with !OPENSSL_NO_EC
-
-* spdylay_ssl: fix the user-agent position
-
-  Patch from soyer
-
-* spdycat: Add missing verbose output for upload DATA
-
-* Call on_stream_close_callback for stream in SPDYLAY_STREAM_INITIAL state
-
-  We call on_stream_close_callback even if stream->state is
-  SPDYLAY_STREAM_INITIAL. This will happen while sending request
-  HEADERS, a local endpoint receives RST_STREAM for that stream. It
-  may be PROTOCOL_ERROR, but without notifying stream closure will
-  hang the stream in a local endpoint.
+* Fixed buffer overrun in spdylay_pq_push

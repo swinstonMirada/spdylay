@@ -22,24 +22,62 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef SPDYLAY_INT_H
-#define SPDYLAY_INT_H
+#ifndef HTML_PARSER_H
+#define HTML_PARSER_H
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#endif // HAVE_CONFIG_H
 
-#include <stdint.h>
+#include <vector>
+#include <string>
 
-/* Macros, types and constants for internal use */
+#ifdef HAVE_LIBXML2
 
-typedef int (*spdylay_compar)(const void *lhs, const void *rhs);
+#include <libxml/HTMLparser.h>
 
-/* Internal error code. They must be in the range [-499, -100],
-   inclusive. */
-typedef enum {
-  SPDYLAY_ERR_CREDENTIAL_PENDING = -101,
-  SPDYLAY_ERR_FRAME_TOO_LARGE = -102
-} spdylay_internal_error;
+namespace spdylay {
 
-#endif /* SPDYLAY_INT_H */
+struct ParserData {
+  std::string base_uri;
+  std::vector<std::string> links;
+  ParserData(const std::string& base_uri);
+};
+
+class HtmlParser {
+public:
+  HtmlParser(const std::string& base_uri);
+  ~HtmlParser();
+  int parse_chunk(const char *chunk, size_t size, int fin);
+  const std::vector<std::string>& get_links() const;
+  void clear_links();
+private:
+  int parse_chunk_internal(const char *chunk, size_t size, int fin);
+
+  std::string base_uri_;
+  htmlParserCtxtPtr parser_ctx_;
+  ParserData parser_data_;
+};
+
+} // namespace spdylay
+
+#else // !HAVE_LIBXML2
+
+namespace spdylay {
+
+class HtmlParser {
+public:
+  HtmlParser(const std::string& base_uri) {}
+  ~HtmlParser() {}
+  int parse_chunk(const char *chunk, size_t size, int fin) { return 0; }
+  const std::vector<std::string>& get_links() const { return links_; }
+  void clear_links() {}
+private:
+  std::vector<std::string> links_;
+};
+
+} // namespace spdylay
+
+#endif // !HAVE_LIBXML2
+
+#endif // HTML_PARSER_H

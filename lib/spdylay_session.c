@@ -140,12 +140,10 @@ static int spdylay_session_new(spdylay_session **session_ptr,
                                uint16_t version,
                                const spdylay_session_callbacks *callbacks,
                                void *user_data,
-                               size_t cli_certvec_length,
-                               int hd_comp)
+                               size_t cli_certvec_length)
 {
   int r;
-  if(version != SPDYLAY_PROTO_SPDY2 && version != SPDYLAY_PROTO_SPDY3 &&
-     version != SPDYLAY_PROTO_SPDY3_1) {
+  if(version != SPDYLAY_PROTO_SPDY2 && version != SPDYLAY_PROTO_SPDY3) {
     return SPDYLAY_ERR_UNSUPPORTED_VERSION;
   }
   *session_ptr = malloc(sizeof(spdylay_session));
@@ -155,26 +153,14 @@ static int spdylay_session_new(spdylay_session **session_ptr,
   }
   memset(*session_ptr, 0, sizeof(spdylay_session));
 
+  (*session_ptr)->version = version;
+
   /* next_stream_id, last_recv_stream_id and next_unique_id are
      initialized in either spdylay_session_client_new or
      spdylay_session_server_new */
 
-  switch(version) {
-  case SPDYLAY_PROTO_SPDY2:
-    (*session_ptr)->version = version;
-    (*session_ptr)->flow_control = SPDYLAY_FLOW_CONTROL_NONE;
-    break;
-  case SPDYLAY_PROTO_SPDY3:
-    (*session_ptr)->version = version;
-    (*session_ptr)->flow_control = SPDYLAY_FLOW_CONTROL_STREAM;
-    break;
-  case SPDYLAY_PROTO_SPDY3_1:
-    (*session_ptr)->version = SPDYLAY_PROTO_SPDY3;
-    (*session_ptr)->flow_control = SPDYLAY_FLOW_CONTROL_STREAM |
-      SPDYLAY_FLOW_CONTROL_CONNECTION;
-    (*session_ptr)->window_size = SPDYLAY_INITIAL_WINDOW_SIZE;
-    break;
-  }
+  (*session_ptr)->flow_control =
+    (*session_ptr)->version == SPDYLAY_PROTO_SPDY3;
 
   (*session_ptr)->last_ping_unique_id = 0;
 
@@ -186,7 +172,6 @@ static int spdylay_session_new(spdylay_session **session_ptr,
   (*session_ptr)->max_recv_ctrl_frame_buf = (1 << 24)-1;
 
   r = spdylay_zlib_deflate_hd_init(&(*session_ptr)->hd_deflater,
-                                   hd_comp,
                                    (*session_ptr)->version);
   if(r != 0) {
     goto fail_hd_deflater;
@@ -196,10 +181,7 @@ static int spdylay_session_new(spdylay_session **session_ptr,
   if(r != 0) {
     goto fail_hd_inflater;
   }
-  r = spdylay_map_init(&(*session_ptr)->streams);
-  if(r != 0) {
-    goto fail_streams;
-  }
+  spdylay_map_init(&(*session_ptr)->streams);
   r = spdylay_pq_init(&(*session_ptr)->ob_pq, spdylay_outbound_item_compar);
   if(r != 0) {
     goto fail_ob_pq;
@@ -271,7 +253,6 @@ static int spdylay_session_new(spdylay_session **session_ptr,
   spdylay_pq_free(&(*session_ptr)->ob_pq);
  fail_ob_pq:
   spdylay_map_free(&(*session_ptr)->streams);
- fail_streams:
   spdylay_zlib_inflate_free(&(*session_ptr)->hd_inflater);
  fail_hd_inflater:
   spdylay_zlib_deflate_free(&(*session_ptr)->hd_deflater);
@@ -287,9 +268,8 @@ int spdylay_session_client_new(spdylay_session **session_ptr,
                                void *user_data)
 {
   int r;
-  /* For client side session, header compression is disabled. */
   r = spdylay_session_new(session_ptr, version, callbacks, user_data,
-                          SPDYLAY_INITIAL_CLIENT_CERT_VECTOR_LENGTH, 0);
+                          SPDYLAY_INITIAL_CLIENT_CERT_VECTOR_LENGTH);
   if(r == 0) {
     /* IDs for use in client */
     (*session_ptr)->next_stream_id = 1;
@@ -305,9 +285,8 @@ int spdylay_session_server_new(spdylay_session **session_ptr,
                                void *user_data)
 {
   int r;
-  /* Enable header compression on server side. */
   r = spdylay_session_new(session_ptr, version, callbacks, user_data,
-                          0, 1 /* hd_comp */);
+                          0);
   if(r == 0) {
     (*session_ptr)->server = 1;
     /* IDs for use in client */
@@ -318,10 +297,10 @@ int spdylay_session_server_new(spdylay_session **session_ptr,
   return r;
 }
 
-static int spdylay_free_streams(spdylay_map_entry *entry, void *ptr)
+static int spdylay_free_streams(key_type key, void *val, void *ptr)
 {
-  spdylay_stream_free((spdylay_stream*)entry);
-  free(entry);
+  spdylay_stream_free((spdylay_stream*)val);
+  free(val);
   return 0;
 }
 
@@ -350,7 +329,7 @@ void spdylay_session_del(spdylay_session *session)
   if(session == NULL) {
     return;
   }
-  spdylay_map_each_free(&session->streams, spdylay_free_streams, NULL);
+  spdylay_map_each(&session->streams, spdylay_free_streams, NULL);
   spdylay_map_free(&session->streams);
   spdylay_session_ob_pq_free(&session->ob_pq);
   spdylay_session_ob_pq_free(&session->ob_ss_pq);
@@ -370,7 +349,7 @@ int spdylay_session_add_frame(spdylay_session *session,
                               void *abs_frame,
                               void *aux_data)
 {
-  int r = 0;
+  int r;
   spdylay_outbound_item *item;
   item = malloc(sizeof(spdylay_outbound_item));
   if(item == NULL) {
@@ -382,7 +361,6 @@ int spdylay_session_add_frame(spdylay_session *session,
   item->seq = session->next_seq++;
   /* Set priority lowest at the moment. */
   item->pri = spdylay_session_get_pri_lowest(session);
-  item->pri_decay = 1;
   if(frame_cat == SPDYLAY_CTRL) {
     spdylay_frame *frame = (spdylay_frame*)abs_frame;
     spdylay_frame_type frame_type = frame->ctrl.hd.type;
@@ -463,7 +441,6 @@ int spdylay_session_add_frame(spdylay_session *session,
     free(item);
     return r;
   }
-  item->inipri = item->pri;
   return 0;
 }
 
@@ -502,7 +479,7 @@ spdylay_stream* spdylay_session_open_stream(spdylay_session *session,
                       session->remote_settings
                       [SPDYLAY_SETTINGS_INITIAL_WINDOW_SIZE],
                       stream_user_data);
-  r = spdylay_map_insert(&session->streams, &stream->map_entry);
+  r = spdylay_map_insert(&session->streams, stream_id, stream);
   if(r != 0) {
     free(stream);
     stream = NULL;
@@ -520,13 +497,8 @@ int spdylay_session_close_stream(spdylay_session *session, int32_t stream_id,
 {
   spdylay_stream *stream = spdylay_session_get_stream(session, stream_id);
   if(stream) {
-    /* We call on_stream_close_callback even if stream->state is
-       SPDYLAY_STREAM_INITIAL. This will happen while sending request
-       HEADERS, a local endpoint receives RST_STREAM for that
-       stream. It may be PROTOCOL_ERROR, but without notifying stream
-       closure will hang the stream in a local endpoint.
-     */
-    if(session->callbacks.on_stream_close_callback) {
+    if(stream->state != SPDYLAY_STREAM_INITIAL &&
+       session->callbacks.on_stream_close_callback) {
       session->callbacks.on_stream_close_callback(session, stream_id,
                                                   status_code,
                                                   session->user_data);
@@ -536,7 +508,7 @@ int spdylay_session_close_stream(spdylay_session *session, int32_t stream_id,
     } else {
       --session->num_incoming_streams;
     }
-    spdylay_map_remove(&session->streams, stream_id);
+    spdylay_map_erase(&session->streams, stream_id);
     spdylay_stream_free(stream);
     free(stream);
     return 0;
@@ -611,7 +583,8 @@ static int spdylay_session_predicate_syn_stream_send
   if(frame->assoc_stream_id != 0) {
     /* Check associated stream is active. */
     /* We assume here that if frame->assoc_stream_id != 0,
-       session->server is always 1. */
+       session->server is always 1 and frame->assoc_stream_id is
+       odd. */
     if(spdylay_session_get_stream(session, frame->assoc_stream_id) ==
        NULL) {
       return SPDYLAY_ERR_STREAM_CLOSED;
@@ -723,12 +696,7 @@ static int spdylay_session_predicate_window_update_send
 (spdylay_session *session,
  int32_t stream_id)
 {
-  spdylay_stream *stream;
-  if((session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) &&
-     stream_id == 0) {
-    return 0;
-  }
-  stream = spdylay_session_get_stream(session, stream_id);
+  spdylay_stream *stream = spdylay_session_get_stream(session, stream_id);
   if(stream == NULL) {
     return SPDYLAY_ERR_STREAM_CLOSED;
   }
@@ -747,18 +715,14 @@ static int spdylay_session_predicate_window_update_send
 static size_t spdylay_session_next_data_read(spdylay_session *session,
                                              spdylay_stream *stream)
 {
-  int32_t window_size = SPDYLAY_DATA_PAYLOAD_LENGTH;
-  if(session->flow_control == SPDYLAY_FLOW_CONTROL_NONE) {
-    return window_size;
+  if(session->flow_control == 0) {
+    return SPDYLAY_DATA_PAYLOAD_LENGTH;
+  } else if(stream->window_size > 0) {
+    return stream->window_size < SPDYLAY_DATA_PAYLOAD_LENGTH ?
+      stream->window_size : SPDYLAY_DATA_PAYLOAD_LENGTH;
+  } else {
+    return 0;
   }
-  window_size = spdylay_min(window_size, stream->window_size);
-  if(session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) {
-    window_size = spdylay_min(window_size, session->window_size);
-  }
-  if(window_size > 0) {
-    return window_size;
-  }
-  return 0;
 }
 
 /*
@@ -950,7 +914,7 @@ int spdylay_session_prep_credential(spdylay_session *session,
         return SPDYLAY_ERR_CREDENTIAL_PENDING;
       }
     } else {
-      return (int32_t)slot;
+      return slot;
     }
   }
   return 0;
@@ -965,7 +929,7 @@ int spdylay_session_prep_credential(spdylay_session *session,
 static ssize_t spdylay_session_prep_frame(spdylay_session *session,
                                           spdylay_outbound_item *item)
 {
-  ssize_t framebuflen = 0;
+  ssize_t framebuflen;
   if(item->frame_cat == SPDYLAY_CTRL) {
     spdylay_frame *frame;
     spdylay_frame_type frame_type;
@@ -999,6 +963,8 @@ static ssize_t spdylay_session_prep_frame(spdylay_session *session,
           } else {
             return r;
           }
+        } else if(r < 0) {
+          return r;
         }
         frame->syn_stream.slot = slot_index;
       }
@@ -1281,22 +1247,6 @@ spdylay_outbound_item* spdylay_session_pop_next_ob_item
 }
 
 /*
- * Adjust priority of the |item|. In order to prevent the low priority
- * streams from starving, lower the priority of the |item| by
- * item->pri_decay. If the resulting priority exceeds lowest priority,
- * back to the original priority.
- */
-static void adjust_pri(spdylay_outbound_item *item, int pri_lowest)
-{
-  if(item->pri + item->pri_decay > pri_lowest) {
-    item->pri = item->inipri;
-    item->pri_decay = 1;
-    return;
-  }
-  item->pri += item->pri_decay++;
-}
-
-/*
  * Called after a frame is sent.
  *
  * This function returns 0 if it succeeds, or one of the following
@@ -1431,7 +1381,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
          data_frame->eof ? data_frame->flags :
          (data_frame->flags & (~SPDYLAY_DATA_FLAG_FIN)),
          data_frame->stream_id,
-         (int32_t)session->aob.framebuflen-SPDYLAY_HEAD_LEN, session->user_data);
+         session->aob.framebuflen-SPDYLAY_HEAD_LEN, session->user_data);
     }
     if(data_frame->eof && (data_frame->flags & SPDYLAY_DATA_FLAG_FIN)) {
       spdylay_stream *stream =
@@ -1450,11 +1400,10 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
     } else {
       spdylay_outbound_item* next_item;
       next_item = spdylay_session_get_next_ob_item(session);
-      adjust_pri(session->aob.item, spdylay_session_get_pri_lowest(session));
       /* If priority of this stream is higher or equal to other stream
          waiting at the top of the queue, we continue to send this
          data. */
-      if(next_item == NULL || session->aob.item->pri < next_item->pri) {
+      if(next_item == NULL || session->aob.item->pri <= next_item->pri) {
         size_t next_readmax;
         spdylay_stream *stream;
         stream = spdylay_session_get_stream(session, data_frame->stream_id);
@@ -1468,7 +1417,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
           spdylay_active_outbound_item_reset(&session->aob);
           return 0;
         }
-        r = (int32_t)spdylay_session_pack_data(session,
+        r = spdylay_session_pack_data(session,
                                       &session->aob.framebuf,
                                       &session->aob.framebufmax,
                                       next_readmax,
@@ -1498,7 +1447,6 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
           session->aob.framebufoff = 0;
         }
       } else {
-        session->aob.item->seq = session->next_seq++;
         r = spdylay_pq_push(&session->ob_pq, session->aob.item);
         if(r == 0) {
           session->aob.item = NULL;
@@ -1539,7 +1487,7 @@ int spdylay_session_send(spdylay_session *session)
       } else if(framebuflen < 0) {
         if(item->frame_cat == SPDYLAY_CTRL &&
            session->callbacks.on_ctrl_not_send_callback &&
-           spdylay_is_non_fatal((int32_t)framebuflen)) {
+           spdylay_is_non_fatal(framebuflen)) {
           /* The library is responsible for the transmission of
              WINDOW_UPDATE frame, so we don't call error callback for
              it. */
@@ -1550,14 +1498,14 @@ int spdylay_session_send(spdylay_session *session)
               (session,
                frame_type,
                spdylay_outbound_item_get_ctrl_frame(item),
-               (int32_t)framebuflen,
+               framebuflen,
                session->user_data);
           }
         }
         spdylay_outbound_item_free(item);
         free(item);
-        if(spdylay_is_fatal((int32_t)framebuflen)) {
-          return (int32_t)framebuflen;
+        if(spdylay_is_fatal(framebuflen)) {
+          return framebuflen;
         } else {
           continue;
         }
@@ -1585,27 +1533,17 @@ int spdylay_session_send(spdylay_session *session)
         return SPDYLAY_ERR_CALLBACK_FAILURE;
       }
     } else {
+      session->aob.framebufoff += sentlen;
       if(session->flow_control &&
-	 session->aob.item != NULL && 
          session->aob.item->frame_cat == SPDYLAY_DATA) {
         spdylay_data *frame;
         spdylay_stream *stream;
-        int32_t len;
-        if(session->aob.framebufoff < SPDYLAY_FRAME_HEAD_LENGTH) {
-          len = (int32_t)(session->aob.framebufoff + sentlen) - SPDYLAY_FRAME_HEAD_LENGTH;
-        } else {
-          len = (int32_t)sentlen;
-        }
-        if(session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) {
-          session->window_size -= len;
-        }
         frame = spdylay_outbound_item_get_data_frame(session->aob.item);
         stream = spdylay_session_get_stream(session, frame->stream_id);
         if(stream) {
-          stream->window_size -= len;
+          stream->window_size -= spdylay_get_uint32(&session->aob.framebuf[4]);
         }
       }
-      session->aob.framebufoff += sentlen;
       if(session->aob.framebufoff == session->aob.framebuflen) {
         /* Frame has completely sent */
         r = spdylay_session_after_frame_sent(session);
@@ -1703,6 +1641,7 @@ static int spdylay_session_validate_syn_stream(spdylay_session *session,
       return SPDYLAY_INVALID_STREAM;
     }
     if((frame->hd.flags & SPDYLAY_CTRL_FLAG_UNIDIRECTIONAL) == 0 ||
+       frame->assoc_stream_id % 2 == 0 ||
        spdylay_session_get_stream(session, frame->assoc_stream_id) == NULL) {
       /* It seems spdy/2 spec does not say which status code should be
          returned in these cases. */
@@ -1876,8 +1815,6 @@ int spdylay_session_on_rst_stream_received(spdylay_session *session,
   if(!spdylay_session_check_version(session, frame->rst_stream.hd.version)) {
     return 0;
   }
-  spdylay_session_call_on_ctrl_frame_received(session, SPDYLAY_RST_STREAM,
-                                              frame);
   if(session->server &&
      !spdylay_session_is_my_stream_id(session, frame->rst_stream.stream_id) &&
      frame->rst_stream.status_code == SPDYLAY_CANCEL) {
@@ -1889,13 +1826,13 @@ int spdylay_session_on_rst_stream_received(spdylay_session *session,
   return 0;
 }
 
-static int spdylay_update_initial_window_size_func(spdylay_map_entry *entry,
+static int spdylay_update_initial_window_size_func(key_type key, void *value,
                                                    void *ptr)
 {
   spdylay_update_window_size_arg *arg;
   spdylay_stream *stream;
   arg = (spdylay_update_window_size_arg*)ptr;
-  stream = (spdylay_stream*)entry;
+  stream = (spdylay_stream*)value;
   spdylay_stream_update_initial_window_size(stream,
                                             arg->new_window_size,
                                             arg->old_window_size);
@@ -2037,40 +1974,6 @@ int spdylay_session_on_goaway_received(spdylay_session *session,
   return 0;
 }
 
-static int push_back_deferred_data_func(spdylay_map_entry *entry, void *ptr)
-{
-  spdylay_session *session;
-  spdylay_stream *stream;
-  session = (spdylay_session*)ptr;
-  stream = (spdylay_stream*)entry;
-  /* If DATA frame is deferred due to flow control, push it back to
-     outbound queue. */
-  if(stream->deferred_data &&
-     (stream->deferred_flags & SPDYLAY_DEFERRED_FLOW_CONTROL) &&
-     stream->window_size > 0) {
-    int rv;
-    rv = spdylay_pq_push(&session->ob_pq, stream->deferred_data);
-    if(rv == 0) {
-      spdylay_stream_detach_deferred_data(stream);
-    } else {
-      /* FATAL */
-      assert(rv < SPDYLAY_ERR_FATAL);
-      return rv;
-    }
-  }
-  return 0;
-}
-
-/*
- * Push back deferred DATA frames to queue if they are deferred due to
- * connection-level flow control.
- */
-static int push_back_deferred_data(spdylay_session *session)
-{
-  return spdylay_map_each(&session->streams,
-                          push_back_deferred_data_func, session);
-}
-
 int spdylay_session_on_window_update_received(spdylay_session *session,
                                               spdylay_frame *frame)
 {
@@ -2081,59 +1984,32 @@ int spdylay_session_on_window_update_received(spdylay_session *session,
   if(!session->flow_control) {
     return 0;
   }
-  if((session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) &&
-     frame->window_update.stream_id == 0) {
-    if(INT32_MAX - frame->window_update.delta_window_size <
-       session->window_size) {
-      if(session->callbacks.on_invalid_ctrl_recv_callback) {
-        session->callbacks.on_invalid_ctrl_recv_callback(session,
-                                                         SPDYLAY_WINDOW_UPDATE,
-                                                         frame,
-                                                         SPDYLAY_PROTOCOL_ERROR,
-                                                         session->user_data);
-      }
-      return spdylay_session_fail_session(session,
-                                          SPDYLAY_GOAWAY_PROTOCOL_ERROR);
-    }
-    session->window_size += frame->window_update.delta_window_size;
-    if(session->window_size > 0) {
-      int rv;
-      rv = push_back_deferred_data(session);
-      if(rv != 0) {
-        /* FATAL */
-        assert(rv < SPDYLAY_ERR_FATAL);
-        return rv;
-      }
-    }
-    spdylay_session_call_on_ctrl_frame_received(session,
-                                                SPDYLAY_WINDOW_UPDATE, frame);
-    return 0;
-  }
   stream = spdylay_session_get_stream(session, frame->window_update.stream_id);
   if(stream) {
     if(INT32_MAX-frame->window_update.delta_window_size < stream->window_size) {
-      int rv;
-      rv = spdylay_session_handle_invalid_stream
+      int r;
+      r = spdylay_session_handle_invalid_stream
         (session, frame->window_update.stream_id, SPDYLAY_WINDOW_UPDATE, frame,
          SPDYLAY_FLOW_CONTROL_ERROR);
-      return rv;
-    }
-    stream->window_size += frame->window_update.delta_window_size;
-    if(stream->window_size > 0 &&
-       stream->deferred_data != NULL &&
-       (stream->deferred_flags & SPDYLAY_DEFERRED_FLOW_CONTROL)) {
-      int rv;
-      rv = spdylay_pq_push(&session->ob_pq, stream->deferred_data);
-      if(rv == 0) {
-        spdylay_stream_detach_deferred_data(stream);
-      } else if(rv < 0) {
-        /* FATAL */
-        assert(rv < SPDYLAY_ERR_FATAL);
-        return rv;
+      return r;
+    } else {
+      stream->window_size += frame->window_update.delta_window_size;
+      if(stream->window_size > 0 &&
+         stream->deferred_data != NULL &&
+         (stream->deferred_flags & SPDYLAY_DEFERRED_FLOW_CONTROL)) {
+        int r;
+        r = spdylay_pq_push(&session->ob_pq, stream->deferred_data);
+        if(r == 0) {
+          spdylay_stream_detach_deferred_data(stream);
+        } else if(r < 0) {
+          /* FATAL */
+          assert(r < SPDYLAY_ERR_FATAL);
+          return r;
+        }
       }
+      spdylay_session_call_on_ctrl_frame_received(session,
+                                                  SPDYLAY_WINDOW_UPDATE, frame);
     }
-    spdylay_session_call_on_ctrl_frame_received(session,
-                                                SPDYLAY_WINDOW_UPDATE, frame);
   }
   return 0;
 }
@@ -2493,15 +2369,10 @@ int spdylay_session_on_data_received(spdylay_session *session,
         }
       }
     } else {
-      if(stream->state != SPDYLAY_STREAM_CLOSING) {
-        status_code = SPDYLAY_PROTOCOL_ERROR;
-      }
+      status_code = SPDYLAY_PROTOCOL_ERROR;
     }
   } else {
-    /* This should be treated as stream error, but it results in lots
-       of RST_STREAM. So just ignore frame against nonexistent stream
-       for now. */
-    /* status_code = SPDYLAY_INVALID_STREAM; */
+    status_code = SPDYLAY_INVALID_STREAM;
   }
   if(status_code != 0) {
     r = spdylay_session_add_rst_stream(session, stream_id, status_code);
@@ -2529,66 +2400,10 @@ static int spdylay_session_process_data_frame(spdylay_session *session)
   }
 }
 
-static int update_recv_window_size(spdylay_session *session,
-                                   int32_t *recv_window_size_ptr,
-                                   int32_t stream_id,
-                                   int32_t delta_size,
-                                   int32_t initial_window_size)
-{
-  /* If SPDYLAY_OPT_NO_AUTO_WINDOW_UPDATE is set and the application
-     does not send WINDOW_UPDATE and the remote endpoint keeps sending
-     data, *recv_window_size_ptr will eventually overflow. */
-  if(*recv_window_size_ptr > INT32_MAX - delta_size) {
-    return spdylay_session_fail_session(session,
-                                        SPDYLAY_GOAWAY_PROTOCOL_ERROR);
-  } else {
-    *recv_window_size_ptr += delta_size;
-  }
-  if(!(session->opt_flags & SPDYLAY_OPTMASK_NO_AUTO_WINDOW_UPDATE)) {
-    /* This is just a heuristics. */
-    /* We have to use local_settings here because it is the constraint
-       the remote endpoint should honor. */
-    if(*recv_window_size_ptr >= initial_window_size / 2) {
-      int rv;
-      rv = spdylay_session_add_window_update(session, stream_id,
-                                            *recv_window_size_ptr);
-      if(rv != 0) {
-        return rv;
-      }
-      *recv_window_size_ptr = 0;
-    }
-  }
-  return 0;
-}
-
 /*
- * Accumulates received bytes |delta_size| to connection-level window
- * size and decides whether to send WINDOW_UPDATE. If
- * SPDYLAY_OPT_NO_AUTO_WINDOW_UPDATE is set, WINDOW_UPDATE will not be
- * sent.
- *
- * This function returns 0 if it succeeds, or one of the following
- * negative error codes:
- *
- * SPDYLAY_ERR_NOMEM
- *     Out of memory.
- */
-static int spdylay_session_update_recv_connection_window_size
-(spdylay_session *session,
- int32_t delta_size)
-{
-  return update_recv_window_size(session,
-                                 &session->recv_window_size,
-                                 0,
-                                 delta_size,
-                                 SPDYLAY_INITIAL_WINDOW_SIZE);
-}
-
-/*
- * Accumulates received bytes |delta_size| to stream-level window size
- * and decides whether to send WINDOW_UPDATE. If
- * SPDYLAY_OPT_NO_AUTO_WINDOW_UPDATE is set, WINDOW_UPDATE will not be
- * sent.
+ * Accumulates received bytes |delta_size| and decides whether to send
+ * WINDOW_UPDATE. If SPDYLAY_OPT_NO_AUTO_WINDOW_UPDATE is set,
+ * WINDOW_UPDATE will not be sent.
  *
  * This function returns 0 if it succeeds, or one of the following
  * negative error codes:
@@ -2603,36 +2418,29 @@ static int spdylay_session_update_recv_window_size(spdylay_session *session,
   spdylay_stream *stream;
   stream = spdylay_session_get_stream(session, stream_id);
   if(stream) {
-    return update_recv_window_size(session,
-                                   &stream->recv_window_size,
-                                   stream_id,
-                                   delta_size,
-                                   session->local_settings
-                                   [SPDYLAY_SETTINGS_INITIAL_WINDOW_SIZE]);
-  }
-  return 0;
-}
-
-/*
- * Returns nonzero if the reception of DATA for stream |stream_id| is
- * allowed.
- */
-static int spdylay_session_check_data_recv_allowed(spdylay_session *session,
-                                                   int32_t stream_id)
-{
-  spdylay_stream *stream;
-  stream = spdylay_session_get_stream(session, stream_id);
-  if(stream) {
-    if((stream->shut_flags & SPDYLAY_SHUT_RD) == 0) {
-      if(spdylay_session_is_my_stream_id(session, stream_id)) {
-        if(stream->state == SPDYLAY_STREAM_OPENED) {
-          return 1;
+    /* If SPDYLAY_OPT_NO_AUTO_WINDOW_UPDATE is set and the application
+       does not send WINDOW_UPDATE and the remote endpoint keeps
+       sending data, stream->recv_window_size will eventually
+       overflow. */
+    if(stream->recv_window_size > INT32_MAX - delta_size) {
+      stream->recv_window_size = INT32_MAX;
+    } else {
+      stream->recv_window_size += delta_size;
+    }
+    if(!(session->opt_flags & SPDYLAY_OPTMASK_NO_AUTO_WINDOW_UPDATE)) {
+      /* This is just a heuristics. */
+      /* We have to use local_settings here because it is the constraint
+         the remote endpoint should honor. */
+      if((size_t)stream->recv_window_size*2 >=
+         session->local_settings[SPDYLAY_SETTINGS_INITIAL_WINDOW_SIZE]) {
+        int r;
+        r = spdylay_session_add_window_update(session, stream_id,
+                                              stream->recv_window_size);
+        if(r == 0) {
+          stream->recv_window_size = 0;
+        } else {
+          return r;
         }
-      } else if(stream->state != SPDYLAY_STREAM_CLOSING) {
-        /* It is OK if this is remote peer initiated stream and we did
-           not receive FIN unless stream is in SPDYLAY_STREAM_CLOSING
-           state. This is a race condition. */
-        return 1;
       }
     }
   }
@@ -2700,14 +2508,6 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
             assert(r < SPDYLAY_ERR_FATAL);
             return r;
           }
-        } else {
-          /* Check stream is open. If it is not open or closing,
-             ignore payload. */
-          int32_t stream_id;
-          stream_id = spdylay_get_uint32(session->iframe.headbuf);
-          if(!spdylay_session_check_data_recv_allowed(session, stream_id)) {
-            session->iframe.state = SPDYLAY_RECV_PAYLOAD_IGN;
-          }
         }
       } else {
         break;
@@ -2719,6 +2519,8 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
        session->iframe.state == SPDYLAY_RECV_PAYLOAD_IGN) {
       size_t rempayloadlen;
       size_t bufavail, readlen;
+      int32_t data_stream_id = 0;
+      uint8_t data_flags = SPDYLAY_DATA_FLAG_NONE;
 
       rempayloadlen = session->iframe.payloadlen - session->iframe.off;
       bufavail = inlimit - inmark;
@@ -2759,7 +2561,7 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
                already set. But it is fine because the only possible
                nonzero error code here is SPDYLAY_ERR_FRAME_TOO_LARGE
                and zlib/fatal error can override it. */
-            session->iframe.error_code = (int32_t)decomplen;
+            session->iframe.error_code = decomplen;
           } else if(spdylay_buffer_length(&session->iframe.inflatebuf)
                     > session->max_recv_ctrl_frame_buf) {
             /* If total length in inflatebuf exceeds certain limit,
@@ -2772,48 +2574,36 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
         if(session->iframe.state != SPDYLAY_RECV_PAYLOAD_IGN) {
           memcpy(session->iframe.buf+session->iframe.off, inmark, readlen);
         }
+      } else {
+        /* For data frame, We don't buffer data. Instead, just pass
+           received data to callback function. */
+        data_stream_id = spdylay_get_uint32(session->iframe.headbuf) &
+          SPDYLAY_STREAM_ID_MASK;
+        data_flags = session->iframe.headbuf[4];
+        if(session->callbacks.on_data_chunk_recv_callback) {
+          session->callbacks.on_data_chunk_recv_callback(session,
+                                                         data_flags,
+                                                         data_stream_id,
+                                                         inmark,
+                                                         readlen,
+                                                         session->user_data);
+        }
       }
       session->iframe.off += readlen;
       inmark += readlen;
 
-      if(!spdylay_frame_is_ctrl_frame(session->iframe.headbuf[0]) &&
-         readlen > 0) {
-        /* For data frame, We don't buffer data. Instead, just pass
-           received data to callback function. */
-        int32_t data_stream_id = spdylay_get_uint32(session->iframe.headbuf) &
-          SPDYLAY_STREAM_ID_MASK;
-        uint8_t data_flags = session->iframe.headbuf[4];
-
-        if(session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) {
-          r = spdylay_session_update_recv_connection_window_size(session,
-                                                                 (int32_t)readlen);
-          if(r < 0) {
-            /* FATAL */
-            assert(r < SPDYLAY_ERR_FATAL);
-            return r;
-          }
-        }
-        if(session->flow_control &&
-           session->iframe.state != SPDYLAY_RECV_PAYLOAD_IGN &&
+      if(session->flow_control &&
+         !spdylay_frame_is_ctrl_frame(session->iframe.headbuf[0])) {
+        if(readlen > 0 &&
            (session->iframe.payloadlen != session->iframe.off ||
             (data_flags & SPDYLAY_DATA_FLAG_FIN) == 0)) {
           r = spdylay_session_update_recv_window_size(session,
                                                       data_stream_id,
-                                                      (int32_t)readlen);
+                                                      readlen);
           if(r < 0) {
             /* FATAL */
             assert(r < SPDYLAY_ERR_FATAL);
             return r;
-          }
-        }
-        if(session->iframe.state != SPDYLAY_RECV_PAYLOAD_IGN) {
-          if(session->callbacks.on_data_chunk_recv_callback) {
-            session->callbacks.on_data_chunk_recv_callback(session,
-                                                           data_flags,
-                                                           data_stream_id,
-                                                           inmark - readlen,
-                                                           readlen,
-                                                           session->user_data);
           }
         }
       }
@@ -2844,13 +2634,13 @@ int spdylay_session_recv(spdylay_session *session)
     if(readlen > 0) {
       ssize_t proclen = spdylay_session_mem_recv(session, buf, readlen);
       if(proclen < 0) {
-        return (int32_t)proclen;
+        return proclen;
       }
       assert(proclen == readlen);
     } else if(readlen == 0 || readlen == SPDYLAY_ERR_WOULDBLOCK) {
       return 0;
     } else if(readlen == SPDYLAY_ERR_EOF) {
-      return (int32_t)readlen;
+      return readlen;
     } else if(readlen < 0) {
       return SPDYLAY_ERR_CALLBACK_FAILURE;
     }
@@ -2955,16 +2745,16 @@ ssize_t spdylay_session_pack_data(spdylay_session *session,
                                   spdylay_data *frame)
 {
   ssize_t framelen = datamax+8, r;
-  int eof_flags;
+  int eof;
   uint8_t flags;
   r = spdylay_reserve_buffer(buf_ptr, buflen_ptr, framelen);
   if(r != 0) {
     return r;
   }
-  eof_flags = 0;
+  eof = 0;
   r = frame->data_prd.read_callback
     (session, frame->stream_id, (*buf_ptr)+8, datamax,
-     &eof_flags, &frame->data_prd.source, session->user_data);
+     &eof, &frame->data_prd.source, session->user_data);
   if(r == SPDYLAY_ERR_DEFERRED || r == SPDYLAY_ERR_TEMPORAL_CALLBACK_FAILURE) {
     return r;
   } else if(r < 0 || datamax < (size_t)r) {
@@ -2973,9 +2763,9 @@ ssize_t spdylay_session_pack_data(spdylay_session *session,
   }
   memset(*buf_ptr, 0, SPDYLAY_HEAD_LEN);
   spdylay_put_uint32be(&(*buf_ptr)[0], frame->stream_id);
-  spdylay_put_uint32be(&(*buf_ptr)[4], (uint32_t)r);
+  spdylay_put_uint32be(&(*buf_ptr)[4], r);
   flags = 0;
-  if(eof_flags) {
+  if(eof) {
     frame->eof = 1;
     if(frame->flags & SPDYLAY_DATA_FLAG_FIN) {
       flags |= SPDYLAY_DATA_FLAG_FIN;
@@ -3112,26 +2902,4 @@ int spdylay_session_set_option(spdylay_session *session,
     return SPDYLAY_ERR_INVALID_ARGUMENT;
   }
   return 0;
-}
-
-int32_t spdylay_session_get_stream_recv_data_length
-(spdylay_session *session, int32_t stream_id)
-{
-  spdylay_stream *stream;
-  stream = spdylay_session_get_stream(session, stream_id);
-  if(stream == NULL) {
-    return -1;
-  }
-  if(session->flow_control == SPDYLAY_FLOW_CONTROL_NONE) {
-    return 0;
-  }
-  return stream->recv_window_size;
-}
-
-int32_t spdylay_session_get_recv_data_length(spdylay_session *session)
-{
-  if((session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) == 0) {
-    return 0;
-  }
-  return session->recv_window_size;
 }

@@ -21,8 +21,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-EXTRA_DIST = README.rst apiref-header.rst index.rst mkapiref.py python.rst \
-	package_README.rst _static/default2.css _templates/menu.html
+EXTRA_DIST = README.rst apiref-header.rst index.rst mkapiref.py
 
 # Makefile for Sphinx documentation
 #

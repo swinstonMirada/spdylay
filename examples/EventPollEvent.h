@@ -22,24 +22,23 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef SPDYLAY_INT_H
-#define SPDYLAY_INT_H
+#ifndef EVENT_POLL_EVENT_H
+#define EVENT_POLL_EVENT_H
 
-#ifdef HAVE_CONFIG_H
-#  include <config.h>
-#endif /* HAVE_CONFIG_H */
+namespace spdylay {
 
-#include <stdint.h>
+enum EventPollEvent {
+  EP_POLLIN = 1,
+  EP_POLLOUT = 1 << 1,
+  EP_POLLHUP = 1 << 2,
+  EP_POLLERR = 1 << 3
+};
 
-/* Macros, types and constants for internal use */
+enum EventPollOp {
+  EP_ADD,
+  EP_MOD
+};
 
-typedef int (*spdylay_compar)(const void *lhs, const void *rhs);
+} // namespace spdylay
 
-/* Internal error code. They must be in the range [-499, -100],
-   inclusive. */
-typedef enum {
-  SPDYLAY_ERR_CREDENTIAL_PENDING = -101,
-  SPDYLAY_ERR_FRAME_TOO_LARGE = -102
-} spdylay_internal_error;
-
-#endif /* SPDYLAY_INT_H */
+#endif // EVENT_POLL_EVENT_H

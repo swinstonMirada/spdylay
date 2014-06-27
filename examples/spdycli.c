@@ -576,7 +576,7 @@ static void fetch_uri(const struct URI *uri)
 {
   spdylay_session_callbacks callbacks;
   int fd;
-  SSL_CTX *ssl_ctx;
+  SSL_CTX *ssl_ctx;  
   SSL *ssl;
   struct Request req;
   struct Connection connection;
@@ -591,9 +591,6 @@ static void fetch_uri(const struct URI *uri)
 
   /* Establish connection and setup SSL */
   fd = connect_to(req.host, req.port);
-  if(fd == -1) {
-    die("Could not open file descriptor");
-  }
   ssl_ctx = SSL_CTX_new(SSLv23_client_method());
   if(ssl_ctx == NULL) {
     dief("SSL_CTX_new", ERR_error_string(ERR_get_error(), NULL));
@@ -613,14 +610,14 @@ static void fetch_uri(const struct URI *uri)
   /* Here make file descriptor non-block */
   make_non_block(fd);
   set_tcp_nodelay(fd);
-
+  
   printf("[INFO] SPDY protocol version = %d\n", spdy_proto_version);
   rv = spdylay_session_client_new(&connection.session, spdy_proto_version,
                                   &callbacks, &connection);
   if(rv != 0) {
     diec("spdylay_session_client_new", rv);
   }
-
+  
   /* Submit the HTTP request to the outbound queue. */
   submit_request(&connection, &req);
 
@@ -657,7 +654,6 @@ static int parse_uri(struct URI *res, const char *uri)
 {
   /* We only interested in https */
   size_t len, i, offset;
-  int ipv6addr = 0;
   memset(res, 0, sizeof(struct URI));
   len = strlen(uri);
   if(len < 9 || memcmp("https://", uri, 8) != 0) {
@@ -670,7 +666,6 @@ static int parse_uri(struct URI *res, const char *uri)
     /* IPv6 literal address */
     ++offset;
     ++res->host;
-    ipv6addr = 1;
     for(i = offset; i < len; ++i) {
       if(uri[i] == ']') {
         res->hostlen = i-offset;
@@ -720,7 +715,7 @@ static int parse_uri(struct URI *res, const char *uri)
       res->port = port;
     }
   }
-  res->hostportlen = uri+offset+ipv6addr-res->host;
+  res->hostportlen = uri+offset-res->host;
   for(i = offset; i < len; ++i) {
     if(uri[i] == '#') {
       break;
@@ -741,11 +736,6 @@ int main(int argc, char **argv)
   struct URI uri;
   struct sigaction act;
   int rv;
-
-  if(argc < 2) {
-    die("Specify URI");
-  }
-
   memset(&act, 0, sizeof(struct sigaction));
   act.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &act, 0);

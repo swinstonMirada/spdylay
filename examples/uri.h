@@ -22,24 +22,50 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef SPDYLAY_INT_H
-#define SPDYLAY_INT_H
-
-#ifdef HAVE_CONFIG_H
-#  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#ifndef URI_H
+#define URI_H
 
 #include <stdint.h>
 
-/* Macros, types and constants for internal use */
+#include <string>
 
-typedef int (*spdylay_compar)(const void *lhs, const void *rhs);
+namespace spdylay {
 
-/* Internal error code. They must be in the range [-499, -100],
-   inclusive. */
-typedef enum {
-  SPDYLAY_ERR_CREDENTIAL_PENDING = -101,
-  SPDYLAY_ERR_FRAME_TOO_LARGE = -102
-} spdylay_internal_error;
+namespace uri {
 
-#endif /* SPDYLAY_INT_H */
+struct UriStruct {
+  std::string protocol;
+  std::string host;
+  uint16_t port;
+  std::string dir;
+  std::string file;
+  std::string query;
+  std::string username;
+  std::string password;
+  bool hasPassword;
+  bool ipv6LiteralAddress;
+
+  UriStruct();
+  UriStruct(const UriStruct& c);
+  ~UriStruct();
+
+  UriStruct& operator=(const UriStruct& c);
+  void swap(UriStruct& other);
+};
+
+void swap(UriStruct& lhs, UriStruct& rhs);
+
+// Splits URI uri into components and stores them into result.  On
+// success returns true. Otherwise returns false and result is
+// undefined.
+bool parse(UriStruct& result, const std::string& uri);
+
+std::string construct(const UriStruct& us);
+
+std::string joinUri(const std::string& baseUri, const std::string& uri);
+
+} // namespace uri
+
+} // namespace spdylay
+
+#endif // URI_H

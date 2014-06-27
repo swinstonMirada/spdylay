@@ -46,10 +46,7 @@ ssize_t unpack_frame_with_nv_block(spdylay_frame_type type,
   rv = spdylay_zlib_inflate_hd(inflater, &buffer,
                                &in[SPDYLAY_HEAD_LEN + pnvlen],
                                len - SPDYLAY_HEAD_LEN - pnvlen);
-  if(rv < 0) {
-    spdylay_buffer_free(&buffer);
-    return rv;
-  }
+  CU_ASSERT(rv >= 0);
   switch(type) {
   case SPDYLAY_SYN_STREAM:
     rv = spdylay_frame_unpack_syn_stream(&frame->syn_stream,

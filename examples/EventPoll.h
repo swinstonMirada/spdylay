@@ -22,24 +22,17 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef SPDYLAY_INT_H
-#define SPDYLAY_INT_H
+#ifndef EVENT_POLL_H
+#define EVENT_POLL_H
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
-#endif /* HAVE_CONFIG_H */
+#endif // HAVE_CONFIG_H
 
-#include <stdint.h>
+#ifdef HAVE_EPOLL
+#  include "EventPoll_epoll.h"
+#elif HAVE_KQUEUE
+#  include "EventPoll_kqueue.h"
+#endif // HAVE_KQUEUE
 
-/* Macros, types and constants for internal use */
-
-typedef int (*spdylay_compar)(const void *lhs, const void *rhs);
-
-/* Internal error code. They must be in the range [-499, -100],
-   inclusive. */
-typedef enum {
-  SPDYLAY_ERR_CREDENTIAL_PENDING = -101,
-  SPDYLAY_ERR_FRAME_TOO_LARGE = -102
-} spdylay_internal_error;
-
-#endif /* SPDYLAY_INT_H */
+#endif // EVENT_POLL_H

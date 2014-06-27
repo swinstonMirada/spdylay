@@ -24,174 +24,199 @@
  */
 #include "spdylay_map.h"
 
-#include <string.h>
-
-#define INITIAL_TABLE_LENGTH 16
-
-int spdylay_map_init(spdylay_map *map)
+void spdylay_map_init(spdylay_map *map)
 {
-  map->tablelen = INITIAL_TABLE_LENGTH;
-  map->table = malloc(sizeof(spdylay_map_entry*) * map->tablelen);
-  if(map->table == NULL) {
-    return SPDYLAY_ERR_NOMEM;
-  }
-  memset(map->table, 0, sizeof(spdylay_map_entry*) * map->tablelen);
+  map->root = NULL;
   map->size = 0;
-  return 0;
+}
+
+static void spdylay_map_entry_free(spdylay_map_entry *entry)
+{
+  if(entry != NULL) {
+    free(entry);
+  }
+}
+
+static void spdylay_map_entry_free_recur(spdylay_map_entry *entry)
+{
+  if(entry != NULL) {
+    spdylay_map_entry_free_recur(entry->left);
+    spdylay_map_entry_free_recur(entry->right);
+    free(entry);
+  }
 }
 
 void spdylay_map_free(spdylay_map *map)
 {
-  free(map->table);
+  spdylay_map_entry_free_recur(map->root);
+  map->root = NULL;
 }
 
-void spdylay_map_each_free(spdylay_map *map,
-                           int (*func)(spdylay_map_entry *entry, void *ptr),
-                           void *ptr)
+/*
+ * 32 bit Mix Functions by Thomas Wang
+ *
+ * http://www.concentric.net/~Ttwang/tech/inthash.htm
+ */
+static uint32_t hash32shift(uint32_t key)
 {
-  size_t i;
-  for(i = 0; i < map->tablelen; ++i) {
-    spdylay_map_entry *entry;
-    for(entry = map->table[i]; entry;) {
-      spdylay_map_entry *next = entry->next;
-      func(entry, ptr);
-      entry = next;
-    }
-    map->table[i] = NULL;
+  key = ~key + (key << 15); /* key = (key << 15) - key - 1; */
+  key = key ^ (key >> 12);
+  key = key + (key << 2);
+  key = key ^ (key >> 4);
+  key = key * 2057; /* key = (key + (key << 3)) + (key << 11); */
+  key = key ^ (key >> 16);
+  return key;
+}
+
+static spdylay_map_entry* spdylay_map_entry_new(key_type key, void *val)
+{
+  spdylay_map_entry *entry =
+    (spdylay_map_entry*)malloc(sizeof(spdylay_map_entry));
+  if(entry != NULL) {
+    entry->key = key;
+    entry->val = val;
+    entry->left = entry->right = NULL;
+    entry->priority = hash32shift(key);
   }
+  return entry;
 }
 
-int spdylay_map_each(spdylay_map *map,
-                     int (*func)(spdylay_map_entry *entry, void *ptr),
-                     void *ptr)
+static spdylay_map_entry* rotate_left(spdylay_map_entry *entry)
 {
-  int rv;
-  size_t i;
-  for(i = 0; i < map->tablelen; ++i) {
-    spdylay_map_entry *entry;
-    for(entry = map->table[i]; entry; entry = entry->next) {
-      rv = func(entry, ptr);
-      if(rv != 0) {
-        return rv;
-      }
+  spdylay_map_entry *root = entry->right;
+  entry->right = root->left;
+  root->left = entry;
+  return root;
+}
+
+static spdylay_map_entry* rotate_right(spdylay_map_entry* entry)
+{
+  spdylay_map_entry *root = entry->left;
+  entry->left = root->right;
+  root->right = entry;
+  return root;
+}
+
+static spdylay_map_entry* insert_recur(spdylay_map_entry *entry,
+                                       key_type key, void *val,
+                                       int *error)
+{
+  if(entry == NULL) {
+    entry = spdylay_map_entry_new(key, val);
+    if(entry == NULL) {
+      *error = SPDYLAY_ERR_NOMEM;
+      return NULL;
     }
-  }
-  return 0;
-}
-
-void spdylay_map_entry_init(spdylay_map_entry *entry, key_type key)
-{
-  entry->key = key;
-  entry->next = NULL;
-}
-
-/* Same hash function in openjdk HashMap source code. */
-/* The |mod| must be power of 2 */
-static int32_t hash(int32_t h, int32_t mod)
-{
-  h ^= (h >> 20) ^ (h >> 12);
-  return (h ^ (h >> 7) ^ (h >> 4)) & (mod - 1);
-}
-
-static int insert(spdylay_map_entry **table, size_t tablelen,
-                  spdylay_map_entry *entry)
-{
-  int32_t h = hash(entry->key, (int32_t)tablelen);
-  if(table[h] == NULL) {
-    table[h] = entry;
+  } else if(key == entry->key) {
+    *error = SPDYLAY_ERR_INVALID_ARGUMENT;
+  } else if(key < entry->key) {
+    entry->left = insert_recur(entry->left, key, val, error);
   } else {
-    spdylay_map_entry *p;
-    /* We won't allow duplicated key, so check it out. */
-    for(p = table[h]; p; p = p->next) {
-      if(p->key == entry->key) {
-        return SPDYLAY_ERR_INVALID_ARGUMENT;
-      }
-    }
-    entry->next = table[h];
-    table[h] = entry;
+    entry->right = insert_recur(entry->right, key, val, error);
   }
-  return 0;
+  if(entry->left != NULL && entry->priority > entry->left->priority) {
+    entry = rotate_right(entry);
+  } else if(entry->right != NULL && entry->priority > entry->right->priority) {
+    entry = rotate_left(entry);
+  }
+  return entry;
 }
 
-/* new_tablelen must be power of 2 */
-static int resize(spdylay_map *map, size_t new_tablelen)
+int spdylay_map_insert(spdylay_map *map, key_type key, void *val)
 {
-  size_t i;
-  spdylay_map_entry **new_table;
-  new_table = malloc(sizeof(spdylay_map_entry*) * new_tablelen);
-  if(new_table == NULL) {
-    return SPDYLAY_ERR_NOMEM;
+  int error = 0;
+  map->root = insert_recur(map->root, key, val, &error);
+  if(!error) {
+    ++map->size;
   }
-  memset(new_table, 0, sizeof(spdylay_map_entry*) * new_tablelen);
-  for(i = 0; i < map->tablelen; ++i) {
-    spdylay_map_entry *entry;
-    for(entry = map->table[i]; entry;) {
-      spdylay_map_entry *next = entry->next;
-      entry->next = NULL;
-      /* This function must succeed */
-      insert(new_table, new_tablelen, entry);
-      entry = next;
-    }
-  }
-  free(map->table);
-  map->tablelen = new_tablelen;
-  map->table = new_table;
-  return 0;
+  return error;
 }
 
-int spdylay_map_insert(spdylay_map *map, spdylay_map_entry *new_entry)
+void* spdylay_map_find(spdylay_map *map, key_type key)
 {
-  int rv;
-  /* Load factor is 0.75 */
-  if((map->size + 1) * 4 > map->tablelen * 3) {
-    rv = resize(map, map->tablelen * 2);
-    if(rv != 0) {
-      return rv;
-    }
-  }
-  rv = insert(map->table, map->tablelen, new_entry);
-  if(rv != 0) {
-    return rv;
-  }
-  ++map->size;
-  return 0;
-}
-
-spdylay_map_entry* spdylay_map_find(spdylay_map *map, key_type key)
-{
-  int32_t h;
-  spdylay_map_entry *entry;
-  h = hash(key, (int32_t)map->tablelen);
-  for(entry = map->table[h]; entry; entry = entry->next) {
-    if(entry->key == key) {
-      return entry;
+  spdylay_map_entry *entry = map->root;
+  while(entry != NULL) {
+    if(key < entry->key) {
+      entry = entry->left;
+    } else if(key > entry->key) {
+      entry = entry->right;
+    } else {
+      return entry->val;
     }
   }
   return NULL;
 }
 
-int spdylay_map_remove(spdylay_map *map, key_type key)
+static spdylay_map_entry* erase_rotate_recur(spdylay_map_entry *entry)
 {
-  int32_t h;
-  spdylay_map_entry *entry, *prev;
-  h = hash(key, (int32_t)map->tablelen);
-  prev = NULL;
-  for(entry = map->table[h]; entry; entry = entry->next) {
-    if(entry->key == key) {
-      if(prev == NULL) {
-        map->table[h] = entry->next;
-      } else {
-        prev->next = entry->next;
-      }
-      --map->size;
-      return 0;
-    }
-    prev = entry;
+  if(entry->left == NULL) {
+    spdylay_map_entry *right = entry->right;
+    spdylay_map_entry_free(entry);
+    return right;
+  } else if(entry->right == NULL) {
+    spdylay_map_entry *left = entry->left;
+    spdylay_map_entry_free(entry);
+    return left;
+  } else if(entry->left->priority < entry->right->priority) {
+    entry = rotate_right(entry);
+    entry->right = erase_rotate_recur(entry->right);
+    return entry;
+  } else {
+    entry = rotate_left(entry);
+    entry->left = erase_rotate_recur(entry->left);
+    return entry;
   }
-  return SPDYLAY_ERR_INVALID_ARGUMENT;
+}
+
+static spdylay_map_entry* erase_recur(spdylay_map_entry *entry, key_type key,
+                                      int *error)
+{
+  if(entry == NULL) {
+    *error = SPDYLAY_ERR_INVALID_ARGUMENT;
+  } else if(key < entry->key) {
+    entry->left = erase_recur(entry->left, key, error);
+  } else if(key > entry->key) {
+    entry->right = erase_recur(entry->right, key, error);
+  } else {
+    entry = erase_rotate_recur(entry);
+  }
+  return entry;
+}
+
+void spdylay_map_erase(spdylay_map *map, key_type key)
+{
+  if(map->root != NULL) {
+    int error = 0;
+    map->root = erase_recur(map->root, key, &error);
+    if(!error) {
+      --map->size;
+    }
+  }
 }
 
 size_t spdylay_map_size(spdylay_map *map)
 {
   return map->size;
+}
+
+static int for_each(spdylay_map_entry *entry,
+                    int (*func)(key_type key, void *val, void *ptr),
+                    void *ptr)
+{
+  if(entry) {
+    int rv;
+    if((rv = for_each(entry->left, func, ptr)) != 0 ||
+       (rv = func(entry->key, entry->val, ptr)) != 0 ||
+       (rv = for_each(entry->right, func, ptr)) != 0) {
+      return rv;
+    }
+  }
+  return 0;
+}
+
+int spdylay_map_each(spdylay_map *map,
+                     int (*func)(key_type key, void *val, void *ptr),
+                     void *ptr)
+{
+  return for_each(map->root, func, ptr);
 }

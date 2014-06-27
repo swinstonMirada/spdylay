@@ -1,8 +1,7 @@
 #!/usr/bin/env python
-"""End to end tests for the utility programs.
+"""End to end tests for the example programs.
 
-This test assumes the utilities inside src directory have already been
-built.
+This test assumes the examples have already been built.
 
 At the moment top_buiddir is not in the environment, but top_builddir would be
 more reliable than '..', so it's worth trying to pull it from the environment.
@@ -24,7 +23,7 @@ def _run_server(port, args):
   srcdir = os.environ.get('srcdir', '.')
   testdata = '%s/testdata' % srcdir
   top_builddir = os.environ.get('top_builddir', '..')
-  base_args = ['%s/src/spdyd' % top_builddir, '-d', testdata]
+  base_args = ['%s/examples/spdyd' % top_builddir, '-d', testdata]
   if args:
     base_args.extend(args)
   base_args.extend([str(port), '%s/privkey.pem' % testdata,
@@ -58,7 +57,7 @@ class EndToEndSpdyTests(unittest.TestCase):
 
   def setUp(self):
     build_dir = os.environ.get('top_builddir', '..')
-    self.client = '%s/src/spdycat' % build_dir
+    self.client = '%s/examples/spdycat' % build_dir
     self.stdout = 'No output'
 
   def call(self, path, args):
