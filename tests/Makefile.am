@@ -41,24 +41,24 @@ HFILES = spdylay_pq_test.h spdylay_map_test.h spdylay_queue_test.h \
 main_SOURCES = $(HFILES) $(OBJECTS)
 
 main_LDADD = ${top_builddir}/lib/libspdylay.la
-main_LDFLAGS = -static @CUNIT_LIBS@
+main_LDFLAGS = -static @CUNIT_LIBS@ @TESTS_LIBS@
 
 failmalloc_SOURCES = failmalloc.c failmalloc_test.c failmalloc_test.h \
 	malloc_wrapper.c malloc_wrapper.h \
 	spdylay_test_helper.c spdylay_test_helper.h
-failmalloc_LDADD = $(main_LDADD) -ldl
+failmalloc_LDADD = $(main_LDADD)
 failmalloc_LDFLAGS = $(main_LDFLAGS)
 
-AM_CFLAGS = -Wall -g -O2 -I${top_srcdir}/lib -I${top_srcdir}/lib/includes -I${top_builddir}/lib/includes \
+AM_CFLAGS = -Wall -I${top_srcdir}/lib -I${top_srcdir}/lib/includes -I${top_builddir}/lib/includes \
 	@CUNIT_CFLAGS@ @DEFS@
 
 TESTS = main failmalloc
 
-if ENABLE_EXAMPLES
+if ENABLE_SRC
 
 EXTRA_DIST = end_to_end.py
 TESTS += end_to_end.py
 
-endif # ENABLE_EXAMPLES
+endif # ENABLE_SRC
 
 endif # HAVE_CUNIT

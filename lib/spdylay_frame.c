@@ -44,15 +44,10 @@ size_t spdylay_frame_get_len_size(uint16_t version)
   }
 }
 
-static uint8_t spdylay_unpack_pri(const uint8_t *data)
-{
-  return (data[0] >> 6) & 0x3;
-}
-
 static uint8_t* spdylay_pack_str(uint8_t *buf, const char *str, size_t len,
                                  size_t len_size)
 {
-  spdylay_frame_put_nv_len(buf, (uint32_t)len, len_size);
+  spdylay_frame_put_nv_len(buf, len, len_size);
   buf += len_size;
   memcpy(buf, str, len);
   return buf+len;
@@ -107,6 +102,11 @@ ssize_t spdylay_frame_alloc_pack_nv(uint8_t **buf_ptr,
     return framelen;
   }
   framelen += nv_offset;
+
+  if(framelen - SPDYLAY_FRAME_HEAD_LENGTH > SPDYLAY_LENGTH_MASK) {
+    /* In SPDY/2 and 3, Max frame size is 2**24 - 1. */
+    return SPDYLAY_ERR_FRAME_TOO_LARGE;
+  }
   return framelen;
 }
 
@@ -146,12 +146,7 @@ int spdylay_frame_count_unpack_nv_space(size_t *nvlen_ptr, size_t *buflen_ptr,
         spdylay_buffer_reader_advance(&reader, len);
       }
     }
-    for(j = off, off -= len; off != j; ++off) {
-      uint8_t b = spdylay_buffer_reader_uint8(&reader);
-      if(b == '\0') {
-        ++nvlen;
-      }
-    }
+    nvlen += spdylay_buffer_reader_count(&reader, len, '\0');
     ++nvlen;
   }
   if(inlen == off) {
@@ -162,6 +157,73 @@ int spdylay_frame_count_unpack_nv_space(size_t *nvlen_ptr, size_t *buflen_ptr,
     return SPDYLAY_ERR_INVALID_FRAME;
   }
 }
+
+static int VALID_HD_VALUE_CHARS[] = {
+  1 /* NUL  */, 0 /* SOH  */, 0 /* STX  */, 0 /* ETX  */,
+  0 /* EOT  */, 0 /* ENQ  */, 0 /* ACK  */, 0 /* BEL  */,
+  0 /* BS   */, 1 /* HT   */, 0 /* LF   */, 0 /* VT   */,
+  0 /* FF   */, 0 /* CR   */, 0 /* SO   */, 0 /* SI   */,
+  0 /* DLE  */, 0 /* DC1  */, 0 /* DC2  */, 0 /* DC3  */,
+  0 /* DC4  */, 0 /* NAK  */, 0 /* SYN  */, 0 /* ETB  */,
+  0 /* CAN  */, 0 /* EM   */, 0 /* SUB  */, 0 /* ESC  */,
+  0 /* FS   */, 0 /* GS   */, 0 /* RS   */, 0 /* US   */,
+  1 /* SPC  */, 1 /* !    */, 1 /* "    */, 1 /* #    */,
+  1 /* $    */, 1 /* %    */, 1 /* &    */, 1 /* '    */,
+  1 /* (    */, 1 /* )    */, 1 /* *    */, 1 /* +    */,
+  1 /* ,    */, 1 /* -    */, 1 /* .    */, 1 /* /    */,
+  1 /* 0    */, 1 /* 1    */, 1 /* 2    */, 1 /* 3    */,
+  1 /* 4    */, 1 /* 5    */, 1 /* 6    */, 1 /* 7    */,
+  1 /* 8    */, 1 /* 9    */, 1 /* :    */, 1 /* ;    */,
+  1 /* <    */, 1 /* =    */, 1 /* >    */, 1 /* ?    */,
+  1 /* @    */, 1 /* A    */, 1 /* B    */, 1 /* C    */,
+  1 /* D    */, 1 /* E    */, 1 /* F    */, 1 /* G    */,
+  1 /* H    */, 1 /* I    */, 1 /* J    */, 1 /* K    */,
+  1 /* L    */, 1 /* M    */, 1 /* N    */, 1 /* O    */,
+  1 /* P    */, 1 /* Q    */, 1 /* R    */, 1 /* S    */,
+  1 /* T    */, 1 /* U    */, 1 /* V    */, 1 /* W    */,
+  1 /* X    */, 1 /* Y    */, 1 /* Z    */, 1 /* [    */,
+  1 /* \    */, 1 /* ]    */, 1 /* ^    */, 1 /* _    */,
+  1 /* `    */, 1 /* a    */, 1 /* b    */, 1 /* c    */,
+  1 /* d    */, 1 /* e    */, 1 /* f    */, 1 /* g    */,
+  1 /* h    */, 1 /* i    */, 1 /* j    */, 1 /* k    */,
+  1 /* l    */, 1 /* m    */, 1 /* n    */, 1 /* o    */,
+  1 /* p    */, 1 /* q    */, 1 /* r    */, 1 /* s    */,
+  1 /* t    */, 1 /* u    */, 1 /* v    */, 1 /* w    */,
+  1 /* x    */, 1 /* y    */, 1 /* z    */, 1 /* {    */,
+  1 /* |    */, 1 /* }    */, 1 /* ~    */, 0 /* DEL  */,
+  1 /* 0x80 */, 1 /* 0x81 */, 1 /* 0x82 */, 1 /* 0x83 */,
+  1 /* 0x84 */, 1 /* 0x85 */, 1 /* 0x86 */, 1 /* 0x87 */,
+  1 /* 0x88 */, 1 /* 0x89 */, 1 /* 0x8a */, 1 /* 0x8b */,
+  1 /* 0x8c */, 1 /* 0x8d */, 1 /* 0x8e */, 1 /* 0x8f */,
+  1 /* 0x90 */, 1 /* 0x91 */, 1 /* 0x92 */, 1 /* 0x93 */,
+  1 /* 0x94 */, 1 /* 0x95 */, 1 /* 0x96 */, 1 /* 0x97 */,
+  1 /* 0x98 */, 1 /* 0x99 */, 1 /* 0x9a */, 1 /* 0x9b */,
+  1 /* 0x9c */, 1 /* 0x9d */, 1 /* 0x9e */, 1 /* 0x9f */,
+  1 /* 0xa0 */, 1 /* 0xa1 */, 1 /* 0xa2 */, 1 /* 0xa3 */,
+  1 /* 0xa4 */, 1 /* 0xa5 */, 1 /* 0xa6 */, 1 /* 0xa7 */,
+  1 /* 0xa8 */, 1 /* 0xa9 */, 1 /* 0xaa */, 1 /* 0xab */,
+  1 /* 0xac */, 1 /* 0xad */, 1 /* 0xae */, 1 /* 0xaf */,
+  1 /* 0xb0 */, 1 /* 0xb1 */, 1 /* 0xb2 */, 1 /* 0xb3 */,
+  1 /* 0xb4 */, 1 /* 0xb5 */, 1 /* 0xb6 */, 1 /* 0xb7 */,
+  1 /* 0xb8 */, 1 /* 0xb9 */, 1 /* 0xba */, 1 /* 0xbb */,
+  1 /* 0xbc */, 1 /* 0xbd */, 1 /* 0xbe */, 1 /* 0xbf */,
+  1 /* 0xc0 */, 1 /* 0xc1 */, 1 /* 0xc2 */, 1 /* 0xc3 */,
+  1 /* 0xc4 */, 1 /* 0xc5 */, 1 /* 0xc6 */, 1 /* 0xc7 */,
+  1 /* 0xc8 */, 1 /* 0xc9 */, 1 /* 0xca */, 1 /* 0xcb */,
+  1 /* 0xcc */, 1 /* 0xcd */, 1 /* 0xce */, 1 /* 0xcf */,
+  1 /* 0xd0 */, 1 /* 0xd1 */, 1 /* 0xd2 */, 1 /* 0xd3 */,
+  1 /* 0xd4 */, 1 /* 0xd5 */, 1 /* 0xd6 */, 1 /* 0xd7 */,
+  1 /* 0xd8 */, 1 /* 0xd9 */, 1 /* 0xda */, 1 /* 0xdb */,
+  1 /* 0xdc */, 1 /* 0xdd */, 1 /* 0xde */, 1 /* 0xdf */,
+  1 /* 0xe0 */, 1 /* 0xe1 */, 1 /* 0xe2 */, 1 /* 0xe3 */,
+  1 /* 0xe4 */, 1 /* 0xe5 */, 1 /* 0xe6 */, 1 /* 0xe7 */,
+  1 /* 0xe8 */, 1 /* 0xe9 */, 1 /* 0xea */, 1 /* 0xeb */,
+  1 /* 0xec */, 1 /* 0xed */, 1 /* 0xee */, 1 /* 0xef */,
+  1 /* 0xf0 */, 1 /* 0xf1 */, 1 /* 0xf2 */, 1 /* 0xf3 */,
+  1 /* 0xf4 */, 1 /* 0xf5 */, 1 /* 0xf6 */, 1 /* 0xf7 */,
+  1 /* 0xf8 */, 1 /* 0xf9 */, 1 /* 0xfa */, 1 /* 0xfb */,
+  1 /* 0xfc */, 1 /* 0xfd */, 1 /* 0xfe */, 1 /* 0xff */
+};
 
 int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
                             size_t len_size)
@@ -190,6 +252,7 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
     uint32_t len;
     char *name, *val;
     char *stop;
+    int multival;
     len = spdylay_frame_get_nv_len(&reader, len_size);
     if(len == 0) {
       invalid_header_block = 1;
@@ -198,7 +261,7 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
     spdylay_buffer_reader_data(&reader, (uint8_t*)data, len);
     for(stop = data+len; data != stop; ++data) {
       unsigned char c = *data;
-      if(c < 0x20 || c > 0x7e || ('A' <= c && c <= 'Z')) {
+      if(c < 0x20u || c > 0x7eu || ('A' <= c && c <= 'Z')) {
         invalid_header_block = 1;
       }
     }
@@ -209,6 +272,7 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
     val = data;
     spdylay_buffer_reader_data(&reader, (uint8_t*)data, len);
 
+    multival = 0;
     for(stop = data+len; data != stop; ++data) {
       if(*data == '\0') {
         *idx++ = name;
@@ -217,9 +281,17 @@ int spdylay_frame_unpack_nv(char ***nv_ptr, spdylay_buffer *in,
           invalid_header_block = 1;
         }
         val = data+1;
+        multival = 1;
+      } else if(!VALID_HD_VALUE_CHARS[(unsigned char)*data]) {
+        invalid_header_block = 1;
       }
     }
     *data = '\0';
+    /* Check last header value is empty if NULL separator was
+       found. */
+    if(multival && val == data) {
+      invalid_header_block = 1;
+    }
     ++data;
 
     *idx++ = name;
@@ -247,17 +319,28 @@ size_t spdylay_frame_count_nv_space(char **nv, size_t len_size)
   int i;
   const char *prev = "";
   size_t prevlen = 0;
+  size_t prevvallen = 0;
   for(i = 0; nv[i]; i += 2) {
     const char *key = nv[i];
     const char *val = nv[i+1];
     size_t keylen = strlen(key);
     size_t vallen = strlen(val);
     if(prevlen == keylen && memcmp(prev, key, keylen) == 0) {
-      /* Join previous value, with NULL character */
-      sum += vallen+1;
+      if(vallen) {
+        if(prevvallen) {
+          /* Join previous value, with NULL character */
+          sum += vallen+1;
+          prevvallen = vallen;
+        } else {
+          /* Previous value is empty. In this case, drop the
+             previous. */
+          sum += vallen;
+        }
+      }
     } else {
       prev = key;
       prevlen = keylen;
+      prevvallen = vallen;
       /* SPDY NV header does not include terminating NULL byte */
       sum += keylen+vallen+len_size*2;
     }
@@ -270,28 +353,43 @@ ssize_t spdylay_frame_pack_nv(uint8_t *buf, char **nv, size_t len_size)
   int i;
   uint8_t *bufp = buf+len_size;
   uint32_t num_nv = 0;
-  /* TODO Join values with same keys, using '\0' as a delimiter */
   const char *prev = "";
-  uint8_t *prev_vallen_buf = NULL;
-  uint32_t prev_vallen = 0;
+  uint8_t *cur_vallen_buf = NULL;
+  uint32_t cur_vallen = 0;
+  size_t prevkeylen = 0;
+  size_t prevvallen = 0;
   for(i = 0; nv[i]; i += 2) {
     const char *key = nv[i];
     const char *val = nv[i+1];
     size_t keylen = strlen(key);
     size_t vallen = strlen(val);
-    if(strcmp(prev, key) == 0) {
-      prev_vallen += vallen+1;
-      spdylay_frame_put_nv_len(prev_vallen_buf, prev_vallen, len_size);
-      *bufp = '\0';
-      ++bufp;
-      memcpy(bufp, val, vallen);
-      bufp += vallen;
+    if(prevkeylen == keylen && memcmp(prev, key, keylen) == 0) {
+      if(vallen) {
+        if(prevvallen) {
+          /* Join previous value, with NULL character */
+          cur_vallen += vallen+1;
+          spdylay_frame_put_nv_len(cur_vallen_buf, cur_vallen, len_size);
+          *bufp = '\0';
+          ++bufp;
+          memcpy(bufp, val, vallen);
+          bufp += vallen;
+        } else {
+          /* Previous value is empty. In this case, drop the
+             previous. */
+          cur_vallen += vallen;
+          spdylay_frame_put_nv_len(cur_vallen_buf, cur_vallen, len_size);
+          memcpy(bufp, val, vallen);
+          bufp += vallen;
+        }
+      }
     } else {
       ++num_nv;
       bufp = spdylay_pack_str(bufp, key, keylen, len_size);
       prev = key;
-      prev_vallen_buf = bufp;
-      prev_vallen = (uint32_t)vallen;
+      cur_vallen_buf = bufp;
+      cur_vallen = vallen;
+      prevkeylen = keylen;
+      prevvallen = vallen;
       bufp = spdylay_pack_str(bufp, val, vallen, len_size);
     }
   }
@@ -584,7 +682,7 @@ void spdylay_frame_settings_init(spdylay_settings *frame,
   frame->hd.version = version;
   frame->hd.type = SPDYLAY_SETTINGS;
   frame->hd.flags = flags;
-  frame->hd.length = 4+(int32_t)niv*8;
+  frame->hd.length = 4+niv*8;
   frame->niv = niv;
   frame->iv = iv;
 }
@@ -608,7 +706,7 @@ void spdylay_frame_credential_init(spdylay_credential *frame,
   frame->proof = *proof;
   frame->certs = certs;
   frame->ncerts = ncerts;
-  frame->hd.length = 2+4+(int32_t)frame->proof.length;
+  frame->hd.length = 2+4+frame->proof.length;
   for(i = 0; i < ncerts; ++i) {
     frame->hd.length += 4+frame->certs[i].length;
   }
@@ -658,15 +756,17 @@ ssize_t spdylay_frame_pack_syn_stream(uint8_t **buf_ptr,
   if(framelen < 0) {
     return framelen;
   }
-  frame->hd.length = (int32_t)framelen-SPDYLAY_FRAME_HEAD_LENGTH;
+  frame->hd.length = framelen-SPDYLAY_FRAME_HEAD_LENGTH;
   memset(*buf_ptr, 0, SPDYLAY_SYN_STREAM_NV_OFFSET);
   /* pack ctrl header after length is determined */
   spdylay_frame_pack_ctrl_hd(*buf_ptr, &frame->hd);
   spdylay_put_uint32be(&(*buf_ptr)[8], frame->stream_id);
   spdylay_put_uint32be(&(*buf_ptr)[12], frame->assoc_stream_id);
-  (*buf_ptr)[16] = (frame->pri << 6);
   if(frame->hd.version == SPDYLAY_PROTO_SPDY3) {
+    (*buf_ptr)[16] = (frame->pri << 5);
     (*buf_ptr)[17] = frame->slot;
+  } else {
+    (*buf_ptr)[16] = (frame->pri << 6);
   }
   return framelen;
 }
@@ -703,10 +803,11 @@ int spdylay_frame_unpack_syn_stream_without_nv(spdylay_syn_stream *frame,
   frame->stream_id = spdylay_get_uint32(payload) & SPDYLAY_STREAM_ID_MASK;
   frame->assoc_stream_id =
     spdylay_get_uint32(payload+4) & SPDYLAY_STREAM_ID_MASK;
-  frame->pri = spdylay_unpack_pri(payload+8);
   if(frame->hd.version == SPDYLAY_PROTO_SPDY3) {
+    frame->pri = (*(payload+8) >> 5);
     frame->slot = payload[9];
   } else {
+    frame->pri = (*(payload+8) >> 6);
     frame->slot = 0;
   }
   frame->nv = NULL;
@@ -736,7 +837,7 @@ ssize_t spdylay_frame_pack_syn_reply(uint8_t **buf_ptr,
   if(framelen < 0) {
     return framelen;
   }
-  frame->hd.length = (int32_t)framelen-SPDYLAY_FRAME_HEAD_LENGTH;
+  frame->hd.length = framelen-SPDYLAY_FRAME_HEAD_LENGTH;
   memset(*buf_ptr, 0, nv_offset);
   spdylay_frame_pack_ctrl_hd(*buf_ptr, &frame->hd);
   spdylay_put_uint32be(&(*buf_ptr)[8], frame->stream_id);
@@ -865,7 +966,7 @@ ssize_t spdylay_frame_pack_headers(uint8_t **buf_ptr, size_t *buflen_ptr,
 {
   ssize_t framelen;
   size_t len_size;
-  size_t nv_offset;
+  ssize_t nv_offset;
   len_size = spdylay_frame_get_len_size(frame->hd.version);
   if(len_size == 0) {
     return SPDYLAY_ERR_UNSUPPORTED_VERSION;
@@ -879,7 +980,7 @@ ssize_t spdylay_frame_pack_headers(uint8_t **buf_ptr, size_t *buflen_ptr,
   if(framelen < 0) {
     return framelen;
   }
-  frame->hd.length = (int32_t)framelen-SPDYLAY_FRAME_HEAD_LENGTH;
+  frame->hd.length = framelen-SPDYLAY_FRAME_HEAD_LENGTH;
   memset(*buf_ptr, 0, nv_offset);
   spdylay_frame_pack_ctrl_hd(*buf_ptr, &frame->hd);
   spdylay_put_uint32be(&(*buf_ptr)[8], frame->stream_id);
@@ -999,10 +1100,10 @@ ssize_t spdylay_frame_pack_settings(uint8_t **buf_ptr, size_t *buflen_ptr,
   }
   memset(*buf_ptr, 0, framelen);
   spdylay_frame_pack_ctrl_hd(*buf_ptr, &frame->hd);
-  spdylay_put_uint32be(&(*buf_ptr)[8], (uint32_t)frame->niv);
+  spdylay_put_uint32be(&(*buf_ptr)[8], frame->niv);
   if(frame->hd.version == SPDYLAY_PROTO_SPDY2) {
     for(i = 0; i < frame->niv; ++i) {
-      int off = (int)i*8;
+      int off = i*8;
       /* spdy/2 spec says ID is network byte order, but publicly
          deployed server sends little endian host byte order. */
       (*buf_ptr)[12+off+0] = (frame->iv[i].settings_id) & 0xff;
@@ -1013,7 +1114,7 @@ ssize_t spdylay_frame_pack_settings(uint8_t **buf_ptr, size_t *buflen_ptr,
     }
   } else {
     for(i = 0; i < frame->niv; ++i) {
-      int off = (int)i*8;
+      int off = i*8;
       spdylay_put_uint32be(&(*buf_ptr)[12+off], frame->iv[i].settings_id);
       (*buf_ptr)[12+off] = frame->iv[i].flags;
       spdylay_put_uint32be(&(*buf_ptr)[16+off], frame->iv[i].value);
@@ -1084,12 +1185,12 @@ ssize_t spdylay_frame_pack_credential(uint8_t **buf_ptr, size_t *buflen_ptr,
   offset = SPDYLAY_FRAME_HEAD_LENGTH;
   spdylay_put_uint16be(&(*buf_ptr)[offset], frame->slot);
   offset += 2;
-  spdylay_put_uint32be(&(*buf_ptr)[offset], (uint32_t)frame->proof.length);
+  spdylay_put_uint32be(&(*buf_ptr)[offset], frame->proof.length);
   offset += 4;
   memcpy(&(*buf_ptr)[offset], frame->proof.data, frame->proof.length);
   offset += frame->proof.length;
   for(i = 0; i < frame->ncerts; ++i) {
-    spdylay_put_uint32be(&(*buf_ptr)[offset], (uint32_t)frame->certs[i].length);
+    spdylay_put_uint32be(&(*buf_ptr)[offset], frame->certs[i].length);
     offset += 4;
     memcpy(&(*buf_ptr)[offset], frame->certs[i].data, frame->certs[i].length);
     offset += frame->certs[i].length;
@@ -1129,7 +1230,7 @@ static int spdylay_frame_count_unpack_cert(const uint8_t *payload,
       }
     }
   }
-  return (int)n;
+  return n;
 }
 
 /*
@@ -1266,4 +1367,21 @@ ssize_t spdylay_frame_nv_offset(spdylay_frame_type type, uint16_t version)
     break;
   }
   return -1;
+}
+
+int spdylay_frame_nv_check_null(const char **nv)
+{
+  size_t i, j;
+  for(i = 0; nv[i]; i += 2) {
+    if(nv[i][0] == '\0' || nv[i+1] == NULL) {
+      return 0;
+    }
+    for(j = 0; nv[i][j]; ++j) {
+      unsigned char c = nv[i][j];
+      if(c < 0x20 || c > 0x7e) {
+        return 0;
+      }
+    }
+  }
+  return 1;
 }

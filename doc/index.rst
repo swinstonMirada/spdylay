@@ -7,21 +7,16 @@ Spdylay - SPDY C Library
 ========================
 
 This is an experimental implementation of Google's SPDY protocol in C.
-
-.. hlist::
-   :columns: 3
-
-   * `Download <http://sourceforge.net/projects/spdylay/files/stable/>`_
-   * `Sourceforge.net <http://sourceforge.net/projects/spdylay>`_
-   * `Source <https://github.com/tatsuhiro-t/spdylay>`_
-
-This library provides SPDY version 2 and 3 framing layer
+This library provides SPDY version 2, 3 and 3.1 framing layer
 implementation.  It does not perform any I/O operations.  When the
 library needs them, it calls the callback functions provided by the
 application. It also does not include any event polling mechanism, so
 the application can freely choose the way of handling events. This
 library code does not depend on any particular SSL library (except for
 example programs which depend on OpenSSL 1.0.1 or later).
+
+This project also develops SPDY client, server and proxy on top of
+Spdylay library.
 
 Contents:
 
@@ -30,6 +25,12 @@ Contents:
 
    package_README
    apiref
+   python
+   android-spdy-proxy
+   Download <https://github.com/tatsuhiro-t/spdylay/releases>
+   Old download <http://sourceforge.net/projects/spdylay/files/>
+   Source <https://github.com/tatsuhiro-t/spdylay>
+   Issues <https://github.com/tatsuhiro-t/spdylay/issues>
 
 Resources
 ---------

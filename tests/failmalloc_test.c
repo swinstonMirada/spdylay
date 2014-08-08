@@ -151,6 +151,7 @@ static ssize_t get_credential_proof(spdylay_session *session,
 #define TEST_FAILMALLOC_RUN(FUN)                        \
   size_t nmalloc, i;                                    \
                                                         \
+  spdylay_failmalloc = 0;                               \
   spdylay_nmalloc = 0;                                  \
   FUN();                                                \
   nmalloc = spdylay_nmalloc;                            \
@@ -162,7 +163,8 @@ static ssize_t get_credential_proof(spdylay_session *session,
     /* printf("i=%zu\n", i); */                         \
     FUN();                                              \
     /* printf("nmalloc=%d\n", spdylay_nmalloc); */      \
-  }
+  }                                                     \
+  spdylay_failmalloc = 0;
 
 static void run_spdylay_session_send(void)
 {
@@ -297,7 +299,7 @@ static void run_spdylay_session_recv(void)
   ud.df = &df;
 
   spdylay_failmalloc_pause();
-  spdylay_zlib_deflate_hd_init(&deflater, SPDYLAY_PROTO_SPDY3);
+  spdylay_zlib_deflate_hd_init(&deflater, 1, SPDYLAY_PROTO_SPDY3);
   spdylay_session_server_new(&session, SPDYLAY_PROTO_SPDY3, &callbacks, &ud);
   spdylay_failmalloc_unpause();
 
@@ -403,7 +405,6 @@ static void run_spdylay_frame_pack_syn_stream(void)
   spdylay_frame frame, oframe;
   uint8_t *buf = NULL, *nvbuf = NULL;
   size_t buflen = 0, nvbuflen = 0;
-  spdylay_buffer inflatebuf;
   ssize_t framelen;
   const char *nv[] = { ":host", "example.org",
                        ":scheme", "https",
@@ -411,8 +412,7 @@ static void run_spdylay_frame_pack_syn_stream(void)
   char **nv_copy;
   int rv;
 
-  spdylay_buffer_init(&inflatebuf, 4096);
-  rv = spdylay_zlib_deflate_hd_init(&deflater, SPDYLAY_PROTO_SPDY3);
+  rv = spdylay_zlib_deflate_hd_init(&deflater, 1, SPDYLAY_PROTO_SPDY3);
   if(rv != 0) {
     goto deflate_init_fail;
   }
@@ -438,16 +438,16 @@ static void run_spdylay_frame_pack_syn_stream(void)
     goto fail;
   }
   spdylay_frame_syn_stream_free(&oframe.syn_stream);
- fail:  
+ fail:
   free(buf);
   free(nvbuf);
   spdylay_frame_syn_stream_free(&frame.syn_stream);
  nv_copy_fail:
   spdylay_zlib_inflate_free(&inflater);
  inflate_init_fail:
-  spdylay_zlib_deflate_free(&deflater);  
- deflate_init_fail:  
-  spdylay_buffer_free(&inflatebuf);
+  spdylay_zlib_deflate_free(&deflater);
+ deflate_init_fail:
+  ;
 }
 
 static void run_spdylay_frame_pack_ping(void)

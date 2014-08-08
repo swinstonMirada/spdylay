@@ -80,8 +80,6 @@ typedef struct {
   SPDYLAY_INITIAL_OUTBOUND_FRAMEBUF_LENGTH
 #define SPDYLAY_INITIAL_NV_BUFFER_LENGTH 4096
 
-#define SPDYLAY_INITIAL_WINDOW_SIZE 65536
-
 /* Initial size of client certificate vector */
 #define SPDYLAY_INITIAL_CLIENT_CERT_VECTOR_LENGTH 8
 /* Maxmum size of client certificate vector */
@@ -110,12 +108,13 @@ typedef enum {
 #define SPDYLAY_MAX_UNIQUE_ID ((1u << 31)-1)
 
 typedef struct {
-  spdylay_inbound_state state;
-  uint8_t headbuf[SPDYLAY_HEAD_LEN];
-  /* How many bytes are filled in headbuf */
-  size_t headbufoff;
+  /* Buffer used to store name/value pairs while inflating them using
+     zlib on unpack */
+  spdylay_buffer inflatebuf;
   /* Payload for control frames. It is not used for DATA frames */
   uint8_t *buf;
+  /* How many bytes are filled in headbuf */
+  size_t headbufoff;
   /* Capacity of buf */
   size_t bufmax;
   /* For frames without name/value header block, this is how many
@@ -129,11 +128,10 @@ typedef struct {
   /* How many bytes are received for this frame. off <= payloadlen
      must be fulfilled. */
   size_t off;
-  /* Buffer used to store name/value pairs while inflating them using
-     zlib on unpack */
-  spdylay_buffer inflatebuf;
+  spdylay_inbound_state state;
   /* Error code */
   int error_code;
+  uint8_t headbuf[SPDYLAY_HEAD_LEN];
 } spdylay_inbound_frame;
 
 typedef enum {
@@ -146,11 +144,52 @@ typedef enum {
   SPDYLAY_GOAWAY_FAIL_ON_SEND = 0x4
 } spdylay_goaway_flag;
 
+typedef enum {
+  /* flow control disabled */
+  SPDYLAY_FLOW_CONTROL_NONE = 0,
+  /* stream-level flow control enabled */
+  SPDYLAY_FLOW_CONTROL_STREAM = 1,
+  /* connection-level flow control enabled */
+  SPDYLAY_FLOW_CONTROL_CONNECTION = 1 << 1
+} spdylay_flow_control_flag;
+
 struct spdylay_session {
-  /* The protocol version: either SPDYLAY_PROTO_SPDY2 or
-     SPDYLAY_PROTO_SPDY3  */
-  uint16_t version;
-  uint8_t server;
+  spdylay_map /* <spdylay_stream*> */ streams;
+  /* Queue for outbound frames other than SYN_STREAM */
+  spdylay_pq /* <spdylay_outbound_item*> */ ob_pq;
+  /* Queue for outbound SYN_STREAM frame */
+  spdylay_pq /* <spdylay_outbound_item*> */ ob_ss_pq;
+
+  spdylay_active_outbound_item aob;
+  spdylay_inbound_frame iframe;
+
+  spdylay_zlib hd_deflater;
+  spdylay_zlib hd_inflater;
+
+  /* Client certificate vector */
+  spdylay_client_cert_vector cli_certvec;
+
+  spdylay_session_callbacks callbacks;
+
+  /* Sequence number of outbound frame to maintain the order of
+     enqueue if priority is equal. */
+  int64_t next_seq;
+
+  /* Buffer used to store inflated name/value pairs in wire format
+     temporarily on pack/unpack. */
+  uint8_t *nvbuf;
+
+  void *user_data;
+
+  /* The number of outgoing streams. This will be capped by
+     remote_settings[SPDYLAY_SETTINGS_MAX_CONCURRENT_STREAMS]. */
+  size_t num_outgoing_streams;
+  /* The number of incoming streams. This will be capped by
+     local_settings[SPDYLAY_SETTINGS_MAX_CONCURRENT_STREAMS]. */
+  size_t num_incoming_streams;
+  /* The number of bytes allocated for nvbuf */
+  size_t nvbuflen;
+
   /* Next Stream ID. Made unsigned int to detect >= (1 << 31). */
   uint32_t next_stream_id;
   int32_t last_recv_stream_id;
@@ -158,48 +197,16 @@ struct spdylay_session {
      SPDYLAY_MAX_UNIQUE_ID */
   uint32_t next_unique_id;
 
-  /* Sequence number of outbound frame to maintain the order of
-     enqueue if priority is equal. */
-  int64_t next_seq;
-
-  spdylay_map /* <spdylay_stream*> */ streams;
-  /* The number of outgoing streams. This will be capped by
-     remote_settings[SPDYLAY_SETTINGS_MAX_CONCURRENT_STREAMS]. */
-  size_t num_outgoing_streams;
-  /* The number of incoming streams. This will be capped by
-     local_settings[SPDYLAY_SETTINGS_MAX_CONCURRENT_STREAMS]. */
-  size_t num_incoming_streams;
-
-  /* Queue for outbound frames other than SYN_STREAM */
-  spdylay_pq /* <spdylay_outbound_item*> */ ob_pq;
-  /* Queue for outbound SYN_STREAM frame */
-  spdylay_pq /* <spdylay_outbound_item*> */ ob_ss_pq;
-
-  spdylay_active_outbound_item aob;
-
-  spdylay_inbound_frame iframe;
-
-  /* Buffer used to store inflated name/value pairs in wire format
-     temporarily on pack/unpack. */
-  uint8_t *nvbuf;
-  /* The number of bytes allocated for nvbuf */
-  size_t nvbuflen;
-
-  spdylay_zlib hd_deflater;
-  spdylay_zlib hd_inflater;
-
   /* The last unique ID sent to the peer. */
   uint32_t last_ping_unique_id;
-
-  /* Flags indicating GOAWAY is sent and/or recieved. The flags are
-     composed by bitwise OR-ing spdylay_goaway_flag. */
-  uint8_t goaway_flags;
   /* This is the value in GOAWAY frame sent by remote endpoint. */
   int32_t last_good_stream_id;
-
-  /* Flag to indicate whether this session enforces flow
-     control. Nonzero for flow control enabled. */
-  uint8_t flow_control;
+  /* Current sender window size. This value is computed against the
+     current initial window size of remote endpoint. */
+  int32_t window_size;
+  /* Keep track of the number of bytes received without
+     WINDOW_UPDATE. */
+  int32_t recv_window_size;
 
   /* Settings value received from the remote endpoint. We just use ID
      as index. The index = 0 is unused. */
@@ -212,11 +219,25 @@ struct spdylay_session {
   /* Maxmum size of buffer to use when receving control frame. */
   uint32_t max_recv_ctrl_frame_buf;
 
-  /* Client certificate vector */
-  spdylay_client_cert_vector cli_certvec;
 
-  spdylay_session_callbacks callbacks;
-  void *user_data;
+  /* The protocol version: either SPDYLAY_PROTO_SPDY2 or
+     SPDYLAY_PROTO_SPDY3  */
+  uint16_t version;
+  uint8_t server;
+
+  /* Flags indicating GOAWAY is sent and/or recieved. The flags are
+     composed by bitwise OR-ing spdylay_goaway_flag. */
+  uint8_t goaway_flags;
+
+  /* Flag to indicate whether this session enforces flow
+     control. Bitwise-OR-ing spdylay_flow_control_flag. We assume
+     following combinations only:
+
+     - SPDYLAY_FLOW_CONTROL_NONE (spdy/2)
+     - SPDYLAY_FLOW_CONTROL_STREAM (spdy/3)
+     - SPDYLAY_FLOW_CONTROL_STREAM | SPDYLAY_FLOW_CONTROL_CONNECTION (spdy/3.1)
+  */
+  uint8_t flow_control;
 };
 
 /* Struct used when updating initial window size of each active

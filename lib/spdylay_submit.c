@@ -46,14 +46,13 @@ static int spdylay_submit_syn_stream_shared
   spdylay_data_provider *data_prd_copy = NULL;
   spdylay_syn_stream_aux_data *aux_data;
   if(pri > spdylay_session_get_pri_lowest(session)) {
-    return SPDYLAY_ERR_INVALID_ARGUMENT;
+    pri = spdylay_session_get_pri_lowest(session);
   }
-  if(assoc_stream_id != 0) {
-    if(session->server == 0) {
-      assoc_stream_id = 0;
-    } else if(spdylay_session_is_my_stream_id(session, assoc_stream_id)) {
-      return SPDYLAY_ERR_INVALID_ARGUMENT;
-    }
+  if(assoc_stream_id != 0 && session->server == 0) {
+    assoc_stream_id = 0;
+  }
+  if(!spdylay_frame_nv_check_null(nv)) {
+    return SPDYLAY_ERR_INVALID_ARGUMENT;
   }
   if(data_prd != NULL && data_prd->read_callback != NULL) {
     data_prd_copy = malloc(sizeof(spdylay_data_provider));
@@ -119,6 +118,9 @@ int spdylay_submit_syn_reply(spdylay_session *session, uint8_t flags,
   spdylay_frame *frame;
   char **nv_copy;
   uint8_t flags_copy;
+  if(!spdylay_frame_nv_check_null(nv)) {
+    return SPDYLAY_ERR_INVALID_ARGUMENT;
+  }
   frame = malloc(sizeof(spdylay_frame));
   if(frame == NULL) {
     return SPDYLAY_ERR_NOMEM;
@@ -149,6 +151,9 @@ int spdylay_submit_headers(spdylay_session *session, uint8_t flags,
   spdylay_frame *frame;
   char **nv_copy;
   uint8_t flags_copy;
+  if(!spdylay_frame_nv_check_null(nv)) {
+    return SPDYLAY_ERR_INVALID_ARGUMENT;
+  }
   frame = malloc(sizeof(spdylay_frame));
   if(frame == NULL) {
     return SPDYLAY_ERR_NOMEM;
@@ -236,15 +241,19 @@ int spdylay_submit_window_update(spdylay_session *session, int32_t stream_id,
   if(delta_window_size <= 0) {
     return SPDYLAY_ERR_INVALID_ARGUMENT;
   }
-  stream = spdylay_session_get_stream(session, stream_id);
-  if(stream) {
+  if(stream_id == 0) {
+    session->recv_window_size -= spdylay_min(delta_window_size,
+                                             session->recv_window_size);
+  } else {
+    stream = spdylay_session_get_stream(session, stream_id);
+    if(stream == NULL) {
+      return SPDYLAY_ERR_STREAM_CLOSED;
+    }
     stream->recv_window_size -= spdylay_min(delta_window_size,
                                             stream->recv_window_size);
-    return spdylay_session_add_window_update(session, stream_id,
-                                             delta_window_size);
-  } else {
-    return SPDYLAY_ERR_STREAM_CLOSED;
   }
+  return spdylay_session_add_window_update(session, stream_id,
+                                           delta_window_size);
 }
 
 int spdylay_submit_request(spdylay_session *session, uint8_t pri,
@@ -270,6 +279,9 @@ int spdylay_submit_response(spdylay_session *session,
   char **nv_copy;
   uint8_t flags = 0;
   spdylay_data_provider *data_prd_copy = NULL;
+  if(!spdylay_frame_nv_check_null(nv)) {
+    return SPDYLAY_ERR_INVALID_ARGUMENT;
+  }
   if(data_prd != NULL && data_prd->read_callback != NULL) {
     data_prd_copy = malloc(sizeof(spdylay_data_provider));
     if(data_prd_copy == NULL) {

@@ -33,6 +33,7 @@ int spdylay_gzip_inflate_new(spdylay_gzip **inflater_ptr)
   if(*inflater_ptr == NULL) {
     return SPDYLAY_ERR_NOMEM;
   }
+  (*inflater_ptr)->finished = 0;
   (*inflater_ptr)->zst.next_in = Z_NULL;
   (*inflater_ptr)->zst.avail_in = 0;
   (*inflater_ptr)->zst.zalloc = Z_NULL;
@@ -59,9 +60,12 @@ int spdylay_gzip_inflate(spdylay_gzip *inflater,
                          const uint8_t *in, size_t *inlen_ptr)
 {
   int rv;
-  inflater->zst.avail_in = (uInt)*inlen_ptr;
+  if(inflater->finished) {
+    return SPDYLAY_ERR_GZIP;
+  }
+  inflater->zst.avail_in = *inlen_ptr;
   inflater->zst.next_in = (unsigned char*)in;
-  inflater->zst.avail_out = (uInt)*outlen_ptr;
+  inflater->zst.avail_out = *outlen_ptr;
   inflater->zst.next_out = out;
 
   rv = inflate(&inflater->zst, Z_NO_FLUSH);
@@ -69,8 +73,9 @@ int spdylay_gzip_inflate(spdylay_gzip *inflater,
   *inlen_ptr -= inflater->zst.avail_in;
   *outlen_ptr -= inflater->zst.avail_out;
   switch(rv) {
-  case Z_OK:
   case Z_STREAM_END:
+    inflater->finished = 1;
+  case Z_OK:
   case Z_BUF_ERROR:
     return 0;
   case Z_DATA_ERROR:
@@ -80,6 +85,7 @@ int spdylay_gzip_inflate(spdylay_gzip *inflater,
     return SPDYLAY_ERR_GZIP;
   default:
     assert(0);
+    /* We need this for some compilers */
+    return 0;
   }
-  return SPDYLAY_ERR_GZIP;
 }

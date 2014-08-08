@@ -37,10 +37,10 @@ static void spdy2(void)
   };
   unsigned char outlen;
   unsigned char* out;
-  CU_ASSERT(SPDYLAY_PROTO_SPDY2 ==
+  CU_ASSERT(SPDYLAY_PROTO_SPDY3 ==
             spdylay_select_next_protocol(&out, &outlen, spdy, sizeof(spdy)));
   CU_ASSERT(6 == outlen);
-  CU_ASSERT(memcmp("spdy/2", out, outlen) == 0);
+  CU_ASSERT(memcmp("spdy/3", out, outlen) == 0);
 }
 
 static void http11(void)
@@ -78,4 +78,34 @@ void test_spdylay_npn(void)
   spdy2();
   http11();
   no_overlap();
+}
+
+void test_spdylay_npn_get_proto_list(void)
+{
+  size_t len;
+  const spdylay_npn_proto *list = spdylay_npn_get_proto_list(&len);
+  CU_ASSERT_EQUAL(3, len);
+
+  CU_ASSERT_STRING_EQUAL("spdy/3.1", list[0].proto);
+  CU_ASSERT_EQUAL(8, list[0].len);
+  CU_ASSERT_EQUAL(SPDYLAY_PROTO_SPDY3_1, list[0].version);
+
+  CU_ASSERT_STRING_EQUAL("spdy/3", list[1].proto);
+  CU_ASSERT_EQUAL(6, list[1].len);
+  CU_ASSERT_EQUAL(SPDYLAY_PROTO_SPDY3, list[1].version);
+
+  CU_ASSERT_STRING_EQUAL("spdy/2", list[2].proto);
+  CU_ASSERT_EQUAL(6, list[2].len);
+  CU_ASSERT_EQUAL(SPDYLAY_PROTO_SPDY2, list[2].version);
+}
+
+void test_spdylay_npn_get_version(void)
+{
+  CU_ASSERT(SPDYLAY_PROTO_SPDY3_1 ==
+            spdylay_npn_get_version((const unsigned char*)"spdy/3.1", 8));
+  CU_ASSERT(SPDYLAY_PROTO_SPDY3 ==
+            spdylay_npn_get_version((const unsigned char*)"spdy/3", 6));
+  CU_ASSERT(SPDYLAY_PROTO_SPDY2 ==
+            spdylay_npn_get_version((const unsigned char*)"spdy/2", 6));
+  CU_ASSERT(0 == spdylay_npn_get_version((const unsigned char*)"spdy/4", 6));
 }

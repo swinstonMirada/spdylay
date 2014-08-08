@@ -28,6 +28,8 @@
 void test_spdylay_frame_unpack_nv_spdy2(void);
 void test_spdylay_frame_unpack_nv_spdy3(void);
 void test_spdylay_frame_pack_nv_duplicate_keys(void);
+void test_spdylay_frame_pack_nv_empty_value_spdy2(void);
+void test_spdylay_frame_pack_nv_empty_value_spdy3(void);
 void test_spdylay_frame_count_nv_space(void);
 void test_spdylay_frame_count_unpack_nv_space(void);
 void test_spdylay_frame_pack_ping(void);
@@ -35,6 +37,7 @@ void test_spdylay_frame_pack_goaway_spdy2(void);
 void test_spdylay_frame_pack_goaway_spdy3(void);
 void test_spdylay_frame_pack_syn_stream_spdy2(void);
 void test_spdylay_frame_pack_syn_stream_spdy3(void);
+void test_spdylay_frame_pack_syn_stream_frame_too_large(void);
 void test_spdylay_frame_pack_syn_reply_spdy2(void);
 void test_spdylay_frame_pack_syn_reply_spdy3(void);
 void test_spdylay_frame_pack_headers_spdy2(void);
@@ -49,6 +52,9 @@ void test_spdylay_frame_nv_2to3(void);
 void test_spdylay_frame_nv_3to2(void);
 void test_spdylay_frame_unpack_nv_check_name_spdy2(void);
 void test_spdylay_frame_unpack_nv_check_name_spdy3(void);
+void test_spdylay_frame_unpack_nv_last_empty_value_spdy2(void);
+void test_spdylay_frame_unpack_nv_last_empty_value_spdy3(void);
 void test_spdylay_frame_nv_set_origin(void);
+void test_spdylay_frame_nv_check_null(void);
 
 #endif /* SPDYLAY_FRAME_TEST_H */
