@@ -948,7 +948,7 @@ int spdylay_session_prep_credential(spdylay_session *session,
         return SPDYLAY_ERR_CREDENTIAL_PENDING;
       }
     } else {
-      return slot;
+      return (int32_t)slot;
     }
   }
   return 0;
@@ -1413,7 +1413,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
          data_frame->eof ? data_frame->flags :
          (data_frame->flags & (~SPDYLAY_DATA_FLAG_FIN)),
          data_frame->stream_id,
-         session->aob.framebuflen-SPDYLAY_HEAD_LEN, session->user_data);
+         (int32_t)session->aob.framebuflen-SPDYLAY_HEAD_LEN, session->user_data);
     }
     if(data_frame->eof && (data_frame->flags & SPDYLAY_DATA_FLAG_FIN)) {
       spdylay_stream *stream =
@@ -1449,7 +1449,7 @@ static int spdylay_session_after_frame_sent(spdylay_session *session)
           spdylay_active_outbound_item_reset(&session->aob);
           return 0;
         }
-        r = spdylay_session_pack_data(session,
+        r = (int32_t)spdylay_session_pack_data(session,
                                       &session->aob.framebuf,
                                       &session->aob.framebufmax,
                                       next_readmax,
@@ -1520,7 +1520,7 @@ int spdylay_session_send(spdylay_session *session)
       } else if(framebuflen < 0) {
         if(item->frame_cat == SPDYLAY_CTRL &&
            session->callbacks.on_ctrl_not_send_callback &&
-           spdylay_is_non_fatal(framebuflen)) {
+           spdylay_is_non_fatal((int32_t)framebuflen)) {
           /* The library is responsible for the transmission of
              WINDOW_UPDATE frame, so we don't call error callback for
              it. */
@@ -1531,14 +1531,14 @@ int spdylay_session_send(spdylay_session *session)
               (session,
                frame_type,
                spdylay_outbound_item_get_ctrl_frame(item),
-               framebuflen,
+               (int32_t)framebuflen,
                session->user_data);
           }
         }
         spdylay_outbound_item_free(item);
         free(item);
-        if(spdylay_is_fatal(framebuflen)) {
-          return framebuflen;
+        if(spdylay_is_fatal((int32_t)framebuflen)) {
+          return (int32_t)framebuflen;
         } else {
           continue;
         }
@@ -1572,9 +1572,9 @@ int spdylay_session_send(spdylay_session *session)
         spdylay_stream *stream;
         int32_t len;
         if(session->aob.framebufoff < SPDYLAY_FRAME_HEAD_LENGTH) {
-          len = session->aob.framebufoff + sentlen - SPDYLAY_FRAME_HEAD_LENGTH;
+          len = (int32_t)(session->aob.framebufoff + sentlen) - SPDYLAY_FRAME_HEAD_LENGTH;
         } else {
-          len = sentlen;
+          len = (int32_t)sentlen;
         }
         if(session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) {
           session->window_size -= len;
@@ -2742,7 +2742,7 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
                already set. But it is fine because the only possible
                nonzero error code here is SPDYLAY_ERR_FRAME_TOO_LARGE
                and zlib/fatal error can override it. */
-            session->iframe.error_code = decomplen;
+            session->iframe.error_code = (int32_t)decomplen;
           } else if(spdylay_buffer_length(&session->iframe.inflatebuf)
                     > session->max_recv_ctrl_frame_buf) {
             /* If total length in inflatebuf exceeds certain limit,
@@ -2769,7 +2769,7 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
 
         if(session->flow_control & SPDYLAY_FLOW_CONTROL_CONNECTION) {
           r = spdylay_session_update_recv_connection_window_size(session,
-                                                                 readlen);
+                                                                 (int32_t)readlen);
           if(r < 0) {
             /* FATAL */
             assert(r < SPDYLAY_ERR_FATAL);
@@ -2782,7 +2782,7 @@ ssize_t spdylay_session_mem_recv(spdylay_session *session,
             (data_flags & SPDYLAY_DATA_FLAG_FIN) == 0)) {
           r = spdylay_session_update_recv_window_size(session,
                                                       data_stream_id,
-                                                      readlen);
+                                                      (int32_t)readlen);
           if(r < 0) {
             /* FATAL */
             assert(r < SPDYLAY_ERR_FATAL);
@@ -2827,13 +2827,13 @@ int spdylay_session_recv(spdylay_session *session)
     if(readlen > 0) {
       ssize_t proclen = spdylay_session_mem_recv(session, buf, readlen);
       if(proclen < 0) {
-        return proclen;
+        return (int32_t)proclen;
       }
       assert(proclen == readlen);
     } else if(readlen == 0 || readlen == SPDYLAY_ERR_WOULDBLOCK) {
       return 0;
     } else if(readlen == SPDYLAY_ERR_EOF) {
-      return readlen;
+      return (int32_t)readlen;
     } else if(readlen < 0) {
       return SPDYLAY_ERR_CALLBACK_FAILURE;
     }
@@ -2956,7 +2956,7 @@ ssize_t spdylay_session_pack_data(spdylay_session *session,
   }
   memset(*buf_ptr, 0, SPDYLAY_HEAD_LEN);
   spdylay_put_uint32be(&(*buf_ptr)[0], frame->stream_id);
-  spdylay_put_uint32be(&(*buf_ptr)[4], r);
+  spdylay_put_uint32be(&(*buf_ptr)[4], (uint32_t)r);
   flags = 0;
   if(eof_flags) {
     frame->eof = 1;
