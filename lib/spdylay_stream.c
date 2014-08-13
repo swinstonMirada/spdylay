@@ -66,7 +66,7 @@ int spdylay_stream_add_pushed_stream(spdylay_stream *stream, int32_t stream_id)
     int32_t *streams;
     size_t capacity = stream->pushed_streams_capacity == 0 ?
       5 : stream->pushed_streams_capacity*2;
-    streams = realloc(stream->pushed_streams, capacity*sizeof(uint32_t));
+    streams = (int32_t*)realloc(stream->pushed_streams, capacity*(size_t)sizeof(uint32_t));
     if(streams == NULL) {
       return SPDYLAY_ERR_NOMEM;
     }
